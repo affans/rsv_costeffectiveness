@@ -13,13 +13,16 @@ Base.@kwdef mutable struct Human
     monthborn::Int64 = 0 # month of the born baby
     activeaging::Bool = true # if active, the agent ages every month (this is to prevent newborns that have not been born yet to age)
     preterm::Bool = false
-    gestation::Int64 = 0
+    gestation::Int64 = 0 # 1 = <29, 2 = 29-32 weeks, 3 = 33-35 weeks... only if preterm is true
     houseid::Int64 = 0
     sibling::Bool = false # we want to tag newborns that have a sibling <5.
     rsvpositive::Int64 = 0 
     rsvmonth::Vector{Int64} = Int64[]
     rsvage::Vector{Int64} = Int64[]
     rsvtype::Vector{Int64} = Int64[]
+    eff_outpatient::Vector{Float64} = zeros(Float64, 24)
+    eff_ward::Vector{Float64} = zeros(Float64, 24)
+    eff_icu::Vector{Float64} = zeros(Float64, 24)
 end
 Base.show(io::IO, ::MIME"text/plain", z::Human) = dump(z)
 
@@ -32,18 +35,17 @@ end
 const humans = Array{Human}(undef, 0) 
 const p = ModelParameters()  ## setup default parameters
 const ON_POP = 13448500 # 13448495 from ontario database, but their numbers don't add up
-export humans
+pc(x) = Int(round(x / ON_POP * 100000)) # 13_448_495: max population in ontario 
 
-function main(ip::ModelParameters) 
-    println("running simulation")
-end
+export humans
 
 function main() 
     println("running simulations - testing revise")
     reset_params()  # reset the parameters for the simulation scenario    
     initialize() 
     household() 
-    tag_siblings() 
+    incidence()
+    #tag_siblings() 
 end
 export main
 
@@ -53,7 +55,6 @@ function reset_params(ip::ModelParameters)
     # the p is a global const
     # the ip is an incoming different instance of parameters 
     # copy the values from ip to p. 
-
     ip.popsize == 0 && error("no population size given")
     for x in propertynames(p)
         setfield!(p, x, getfield(ip, x))
@@ -63,10 +64,8 @@ function reset_params(ip::ModelParameters)
 end
 export reset_params
 
-pc(x) = Int(round(x / ON_POP * 100000)) # 13_448_495: max population in ontario 
-
 function initialize() 
-    #reset to defauls 
+    # reset all agents to their default values
     for i = 1:length(humans)
         humans[i] = Human() 
     end
@@ -80,8 +79,8 @@ function initialize()
     println("pop sizes from census data per capita: $size_per_ag, sum: $(sum(size_per_ag))")
     
     # data on babies/newborn, order is June to May multiplied twice since we are doing two years
-    babies_per_month = pc.(@SVector [11830, 13331, 13149, 13051, 13117, 13618, 11376, 11191, 11141, 11614, 11864, 11095])  
-    preterms_per_month = pc.(@SVector [899, 888, 1016, 983, 1044, 1050, 1089, 1067, 1060, 1010, 949, 910])
+    babies_per_month = pc.(@SVector [11864, 11095, 11830, 13331, 13149, 13051, 13117, 13618, 11376, 11191, 11141, 11614])  
+    preterms_per_month = pc.(@SVector [949, 910, 899, 888, 1016, 983, 1044, 1050, 1089, 1067, 1060, 1010 ])
     prop_pre_terms = preterms_per_month ./ babies_per_month # we do it this way to generate some stochasticity instead of fixing the number of preterms per month
     println("newborns distribution: $babies_per_month, sum: $(sum(babies_per_month)), times two: $(sum(babies_per_month) *2)")
 
@@ -107,9 +106,6 @@ function initialize()
         else # a baby is 0 or 1 year old but they are not newborns that are being trakced (perhaps immigration or movement)
             x.monthborn = 0 # we don't really care about the monthborn, because we are not tracking these babies
             x.ageindays = rand(30:730) # but lets give them an age in days because we want them to be included in buckets
-            # if x.ageindays <= 30 
-            #    x.monthborn = 1
-            # end
             # if its 1:730, the assumption is that there are some newborns that are not part of the "count" seyed gave me (immigration, etc)
             # if its 30:730, that means there are newborns from before the simulation started -- this doesnt even matter, since 
         end
@@ -121,7 +117,7 @@ function initialize()
     println("agents with month assigned: $(length(newborns)) -- should be zero.")
  
     # probability of preterm 
-    prob_gestation = Categorical([0.07, 0.17, 0.76]) # 1 = <29, 2 = 29-32 weeks, 3 = 33-35 weeks
+    prob_gestation = Categorical([0.07, 0.17, 0.76]) # 1 = <29, 2 = 29-32 weeks, 3 = 33-36 weeks
 
     # next initialize the newborns (2 years worth) -- use two loops to do two years
     sz_newborns = sum(babies_per_month)
@@ -159,25 +155,11 @@ function initialize()
     return idx
 end
 
-
-function age_statistics() 
-    # statistics
-    _wg = length(findall(x -> x.ageindays < 999, humans))
-    println("number of individuals with an age assigned: $_wg")
-
-    _wg = length(findall(x -> x.newborn == true, humans))
-    println("number ofnew born tracking: $_wg")
-
-
-    # print/save demographics statistics 
-    nbpm = countmap([x.monthborn for x in humans if x.newborn == true])
-    println("distribution of newborns (month => cnt): $nbpm")
-end
-
 function household() 
-    # reset houseids for everyone 
+    # function assigns each agent in the population to a household,
+    # paramterized by Ontario census data 
     for x in humans 
-        x.houseid = 0
+        x.houseid = 0 # reset houseids for everyone 
     end
     adult_indices = shuffle!(findall(x -> x.age > 19 && x.age <= 65, humans))
     grand_indices = shuffle!(findall(x -> x.age > 65, humans))
@@ -240,7 +222,7 @@ function household()
         houseid += 1
     end
    
-    # ## step 1: go through the adults that are supposed to be in single households, no children/grandparents
+    # ## step 2: go through the adults that are supposed to be in single households, no children/grandparents
     # println("value of houseid at step 1: $houseid ") # making sure this isn't reset 
     # for adult_idx in adult_indices[1:one_person_households] # only select this many adults
     #     adult_idx = pop!(adult_indices)
@@ -306,8 +288,8 @@ function generate_household_statistics()
 end
 
 function activate_newborns(mth) 
-    # for a given month, "activate" the newborns so they can go through the aging process
-    # do it this way to prevent aging of babies that are not born yet
+    # for a given month, this function activates newborns so they can go through the aging process
+    # non-activated newborns are not aged 
     @info "activating newborns"
     nb_idx = findall(x -> x.monthborn == mth, humans) 
     for i in nb_idx 
@@ -318,7 +300,7 @@ end
 
 function within_3_month(x, mth)
     # a condition function to check if agents are eligible for infection
-    # max number of infections is 1 and minimum 3 months between infections
+    # max number of infections is 2 and minimum of 3 months between infections
     c1 = x.rsvpositive < 2
     c4 = true
     if length(x.rsvmonth) > 0 
@@ -330,7 +312,7 @@ end
 function increase_age() 
     # increases age by 30 days for those in the 0 - 730 day age bracket (i.e. 0 or 1 year of age)
     # have to be careful not to age the babies that are not born yet
-    all_baby_idx = findall(x -> x.activeaging == true, humans)
+    all_baby_idx = findall(x -> x.activeaging == true, humans)  # we don't have to filter by x.newborn or x.age because activeaging is false for everyone except those who we are tracking
     for idx in all_baby_idx
         x = humans[idx]
         x.ageindays = min(x.ageindays + 30, 731) 
@@ -371,12 +353,12 @@ function get_monthly_agegroup_infcnt()
     # the distribution of yearly cases to monthly cases (starting at January) 
     # this works for both MA and N-MA cases
     # this is split between the age groups:  #<19 d, 19–89 d, 90d to <6mo, 6mo to <1yr, 
-    # order june to may
-    month_distr_ag1 = @SVector [0.0141, 0.0141, 0.0181, 0.0563, 0.0845, 0.1117, 0.1409, 0.1549, 0.1408, 0.1117, 0.0845, 0.0563]
-    month_distr_ag1 = @SVector [0.0141, 0.0141, 0.0181, 0.0563, 0.0845, 0.1117, 0.1409, 0.1549, 0.1408, 0.1117, 0.0845, 0.0563]
-    month_distr_ag3 = @SVector [0.0108, 0.0108, 0.0417, 0.0615, 0.0833, 0.115, 0.1667, 0.1667, 0.115, 0.0833, 0.0615, 0.0417]
-    month_distr_ag4 = @SVector [0.0357, 0.0357, 0.0357, 0.0714, 0.1071, 0.1419, 0.1430, 0.1419, 0.1071, 0.0714, 0.0714, 0.0357]
-    month_distr_ag5 = @SVector [0.0556, 0.0556, 0.0556, 0.0556, 0.0556, 0.1111, 0.1663, 0.1667, 0.1111, 0.0556, 0.0556, 0.0556]
+    # order APRIL TO MARCH
+    month_distr_ag1 = @SVector [0.0845, 0.0563, 0.0141, 0.0141, 0.0181, 0.0563, 0.0845, 0.1117, 0.1409, 0.1549, 0.1408, 0.1117]
+    month_distr_ag1 = @SVector [0.0845, 0.0563, 0.0141, 0.0141, 0.0181, 0.0563, 0.0845, 0.1117, 0.1409, 0.1549, 0.1408, 0.1117]
+    month_distr_ag3 = @SVector [0.0615, 0.0417, 0.0108, 0.0108, 0.0417, 0.0615, 0.0833, 0.1150, 0.1667, 0.1667, 0.115, 0.0833]
+    month_distr_ag4 = @SVector [0.0714, 0.0357, 0.0357, 0.0357, 0.0357, 0.0714, 0.1071, 0.1419, 0.1430, 0.1419, 0.1071, 0.0714]
+    month_distr_ag5 = @SVector [0.0556, 0.0556, 0.0556, 0.0556, 0.0556, 0.0556, 0.0556, 0.1111, 0.1663, 0.1667, 0.1111, 0.0556]
     month_distr = [month_distr_ag1, month_distr_ag1, month_distr_ag3, month_distr_ag4, month_distr_ag5]
 
     # a matrix of age groups x monthly incidence (dim: 5 x 11)
@@ -409,7 +391,7 @@ function incidence()
     monthly_agegroup_incidence = hcat(yr1_monthly_agegroup_incidence, yr1_monthly_agegroup_incidence)
     monthly_agegroup_non_ma = hcat(yr1_monthly_agegroup_non_ma,yr1_monthly_agegroup_non_ma)
     
-    # loop through months: Order is June => 1, July => 1, etc (verify that the vectors used to inject babies and sample monthly counts are in the right order!) 
+    # loop through months: Order is April => 1, May => 2, etc (verify that the vectors used to inject babies and sample monthly counts are in the right order!) 
     for mth in 1:24
         @info "simulating month: $mth"
         activate_newborns(mth) 
@@ -461,8 +443,89 @@ function incidence()
     return totalsick
 end    
 
+# TO DO 
+# record deaths 
+# create counters for outcome_flow to record number of icu/ward/outpatient visits
+
+function maternal_vaccine(coverage=0.60) 
+    # all newborns get maternal vaccine with some coverage
+    newborns = findall(x -> x.newborn == true && rand() < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
+    
+    # define efficacy values over 12 months from time of administration
+    eff_outp = [72, 63, 49, 34, 23, 16, 13, 11, 10, 0, 0, 0] ./ 100
+    eff_ward = [93, 82, 69, 56, 43, 32, 24, 19, 15, 0, 0, 0] ./ 100
+    eff_icu = [93, 82, 69, 56, 43, 32, 24, 19, 15, 0, 0, 0] ./ 100
+
+    for (i, h) in enumerate(newborns)   
+        # initialize empty vectors for each newborn for 24 months (these are their efficacy values for each month)
+        # depending on monthborn, the zeros are placed with the theoretical efficacy value
+        eo = zeros(Float64, 24) 
+        ew = zeros(Float64, 24) 
+        ei = zeros(Float64, 24) 
+        
+        x = humans[h]
+        mb = x.monthborn
+        # a quick error check
+        mb > 12 && error("error in newborns/vaccine, someone is being tracked over 12 months of age") 
+        fm = mb 
+        em = fm + 11
+        x.eff_outpatient[fm:em] .= eff_outp
+        x.eff_ward[fm:em] .= eff_ward
+        x.eff_icu[fm:em] .= eff_icu
+    end
+    println("selected newborns: $(length(newborns))")
+    println("maternal vaccine, coverage value: $coverage")
+end
+
+function lama_vaccine(coverage = 0.90, strat="strat1") 
+    # (i) vaccination of preterm infants under 32 wGA with 90% coverage (S1); 
+    # (ii) vaccination of all preterm infants with 90% coverage (S2) in addition to S1; 
+    # (iii) vaccination of all infants with 90% coverage
+    if strat == "strat1" 
+        newborns = findall(x -> x.newborn == true && x.gestation in (1, 2) && rand() < coverage, humans) # 1 = <29, 2 = 29-32 weeks, 3 = 33-36 weeks
+    elseif strat == "strat2"
+        newborns = findall(x -> x.newborn == true && x.preterm == true && rand() < coverage, humans) ## all preterm, regardless of gestation
+    elseif strat == "strat3" 
+        _newborns_preterm = findall(x -> x.newborn == true && x.preterm == true && rand() < 0.90, humans)
+        _newborns_fullterm = findall(x -> x.newborn == true && x.preterm == false && rand() < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
+        newborns = [_newborns_preterm, _newborns_fullterm]
+    else 
+        error("wrong strategy for lama vaccination")
+    end
+
+    # theoretical efficacies
+    eff_outp = [100, 96, 87, 70, 50, 33, 23, 19, 17, 0, 0, 0] ./ 100
+    eff_ward = [100, 95, 84, 67, 47, 31, 22, 18, 16, 0, 0, 0] ./ 100
+    eff_icu = [100, 97, 91, 80, 64, 47, 33, 24, 20, 0, 0, 0] ./ 100
+
+    cnt = 0 # counter to keep track of how many newborns vaccinated
+    for (i, h) in enumerate(newborns)    
+        x = humans[h]
+        mb = x.monthborn
+        # a quick error check
+        mb > 12 && error("error in newborns/vaccine, someone is being tracked over 12 months of age") 
+        fm = max(7, mb)
+        em = fm + 11
+        x.eff_outpatient[fm:em] .= eff_outp
+        x.eff_ward[fm:em] .= eff_ward
+        x.eff_icu[fm:em] .= eff_icu
+    end
+end
+
+function vaccine_debug() 
+    # debug -- save data in a file to check for bugs 
+    _data = zeros(Float64,  25, length(newborns)) # one column for month born + 24 months of efficacy
+    aa = [humans[x].monthborn for x in newborns]
+    bb = hcat([humans[x].eff_outpatient for x in newborns]...)
+    cc = [aa bb']
+    writedlm("vaccine_test.csv", cc, ",")
+    cc
+end
+
 function outcome_flow(x) 
     # sample the potential outcomes for sick newborn
+
+    # to do: ICU, death is fullterm/preterm specific
 
     prob_inpatient_fullterm = [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] ./ 100
     prob_inpatient_preterm_1 = [6.06, 11.22, 6.96, 4.95, 4.275, 2.85, 2.49, 2.61, 1.965, 2.235, 1.83, 1.62] ./ 100 
@@ -470,13 +533,10 @@ function outcome_flow(x)
     prob_inpatient_preterm_3 = [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] ./ 100
     prob_inpatient_preterm = [prob_inpatient_preterm_1, prob_inpatient_preterm_2, prob_inpatient_preterm_3]
     
-    prob_inpatient = 0 # not defined... gets defined in the loop since it depends on the infection count.
-    prob_icu = 0.13 # otherwise pedward 
-    prob_recovery = 1 - 0.005 # other recovery 
     prob_wheezing = 0.31 # will have to sample duration for cost-effectiveness 
     prob_emergencydept = rand(Uniform(0.4, 0.5))
 
-    days_symptomatic_distr = Uniform(5.68, 6.63) 
+    days_symptomatic_distr = Uniform(5, 8) 
 
     # create empty array to store the flow of outcomes
     flow = String[]
@@ -511,6 +571,11 @@ function outcome_flow(x)
         diff = (x.rsvmonth[ic] - x.monthborn) + 1 # the prob of inpatient depends on when infection happens after birth
         prob_inpatient = distr[diff]
 
+        # for each infection, determine probabilty of ICU and death, depends on preterm or not.
+        prob_icu = x.preterm ? 0.154 : 0.13
+        _prob_recoveries = [0.081, 0.033, 0.033]
+        prob_recovery = x.preterm ? _prob_recoveries[x.gestation] : 0.005
+        
         days_symptomatic = rand(days_symptomatic_distr)
         sampled_days["symptomatic"] += days_symptomatic
 
@@ -518,10 +583,10 @@ function outcome_flow(x)
             push!(flow, "inpatient")
             if rand() < prob_icu 
                 push!(flow, "icu")
-                sampled_days["icu"] += x.preterm ? rand(Gamma(20.22, 0.47)) : rand(Gamma(12.38, 0.42))
+                sampled_days["icu"] += x.gestation in (1, 2) ? rand(Gamma(20.22, 0.47)) : rand(Gamma(12.38, 0.42))
             else # pediatric ward
                 push!(flow, "pediatric ward")
-                sampled_days["pediatricward"] += x.preterm ? rand(Gamma(12.71, 0.48)) : rand(Gamma(6.08, 0.64)) 
+                sampled_days["pediatricward"] += x.gestation in (1, 2) ? rand(Gamma(12.71, 0.48)) : rand(Gamma(6.08, 0.64)) 
             end
             if rand() < prob_recovery  # after ICU or PedWard, check if recovered or death 
                 push!(flow, "recovery")
