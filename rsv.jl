@@ -2,7 +2,9 @@
 using Distributions, StatsBase, Random, StaticArrays
 using DelimitedFiles
 using IterTools
-
+using Base.Filesystem
+using CSV, DataFrames
+using Match
 
 # define an agent and all agent properties
 Base.@kwdef mutable struct Human
@@ -19,9 +21,11 @@ Base.@kwdef mutable struct Human
     rsvpositive::Int64 = 0 
     rsvmonth::Vector{Int64} = Int64[]
     rsvage::Vector{Int64} = Int64[]
-    rsvtype::Vector{Int64} = Int64[]
+    rsvtype::Vector{Int64} = Int64[] # 1=MA, 2=NMA
+    vac_lama::Bool = false # flags for if a person gets LAMA or is maternally immunized 
+    vac_mat::Bool = false 
     eff_outpatient::Vector{Float64} = zeros(Float64, 24)
-    eff_ward::Vector{Float64} = zeros(Float64, 24)
+    eff_hosp::Vector{Float64} = zeros(Float64, 24)
     eff_icu::Vector{Float64} = zeros(Float64, 24)
 end
 Base.show(io::IO, ::MIME"text/plain", z::Human) = dump(z)
@@ -39,15 +43,72 @@ pc(x) = Int(round(x / ON_POP * 100000)) # 13_448_495: max population in ontario
 
 export humans
 
-function main() 
-    println("running simulations - testing revise")
+function main()
     reset_params()  # reset the parameters for the simulation scenario    
-    initialize() 
-    household() 
-    incidence()
-    #tag_siblings() 
+    nb = initialize() 
+    tf = incidence()
+    vc = vaccine_scenarios(:s0) 
+    nbs, ql, rc, inpats, outpats = outcome_analysis()
+end
+
+function simulations() 
+    println("running simulations")
+   
+    reset_params()  # reset the parameters for the simulation scenario    
+    
+    io = open("log.txt", "w")
+    logger = SimpleLogger(io)
+    global_logger(logger)
+   
+    num_of_sims = 500
+    scenarios = [:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7]
+    #scenarios = [:s0, :s1]
+    all_data = []
+    for sc in scenarios 
+        sc_data = zeros(Float64, num_of_sims, 8)
+        for i = 1:num_of_sims
+            #sc = :s0
+            println("sim $i")
+            Random.seed!(53 * i)
+            nb = initialize() 
+            tf = incidence()
+            vc = vaccine_scenarios(sc) 
+            nbs, ql, qd, rc, dc, inpats, outpats = outcome_analysis()
+            sc_data[i,  :] .= [nbs, vc, rc, dc, ql, qd, inpats, outpats]
+        end
+        push!(all_data, sc_data)
+    end
+    flush(io)
+    close(io)
+    #df = DataFrame(rt_data)
+    #unstack(df, [:sim, :rsv_newborns], :scenario, :vaccine_costs)
+    #all_data
+    # colnames 
+    colnames = ["_newborns", "_vaccinecost", "_rsvcost", "_deathcost", "_qalylost", "qalylost_death", "_inpatients", "_outpatients"]
+    scnames = string.(scenarios)
+    dfnames = vcat([sc .* colnames for sc in scnames]...)
+    
+    df = DataFrame(hcat(all_data...), dfnames)
+    CSV.write("output/rsv_simulations.csv", df)
+    #scnames .* colnames
+    #all_data
+    return df
 end
 export main
+
+function vaccine_scenarios(scenario) 
+    vc = @match scenario begin 
+        :s0 => 0 
+        :s1 => lama_vaccine(0.9, "strat1")
+        :s2 => lama_vaccine(0.9, "strat2")
+        :s3 => lama_vaccine(0.9, "strat3")
+        :s4 => maternal_vaccine()
+        :s5 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat1"); _m + _l; end
+        :s6 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat2"); _m + _l; end
+        :s7 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat3"); _m + _l; end
+    end 
+    return vc
+end
 
 ## Initialization Functions 
 reset_params() = reset_params(ModelParameters())
@@ -76,23 +137,24 @@ function initialize()
     ages_per_ag = @SVector [0:4, 5:19, 20:64, 65:99]
     size_per_ag = pc.([697360, 2322285, 8177200, 2251655]) # from census data 
     sum(size_per_ag) != ON_POP && "error -- age groups don't add up to total population size"
-    println("pop sizes from census data per capita: $size_per_ag, sum: $(sum(size_per_ag))")
-    
+    @info "pop size per capita (from census data):" size_per_ag, sum(size_per_ag)
+
     # data on babies/newborn, order is June to May multiplied twice since we are doing two years
     babies_per_month = pc.(@SVector [11864, 11095, 11830, 13331, 13149, 13051, 13117, 13618, 11376, 11191, 11141, 11614])  
     preterms_per_month = pc.(@SVector [949, 910, 899, 888, 1016, 983, 1044, 1050, 1089, 1067, 1060, 1010 ])
     prop_pre_terms = preterms_per_month ./ babies_per_month # we do it this way to generate some stochasticity instead of fixing the number of preterms per month
-    println("newborns distribution: $babies_per_month, sum: $(sum(babies_per_month)), times two: $(sum(babies_per_month) *2)")
+    @info "newborns distribution: $babies_per_month, sum: $(sum(babies_per_month)), times two: $(sum(babies_per_month) *2)"
 
 #    println("$babies_per_month")    
     # from the first age group, remove n agents to be added in as newborns later
     size_per_ag[1] = size_per_ag[1] - (sum(babies_per_month) * 2) # x2 because we are doing two years worth of babies 
-    println("adjusted pop sizes (removed newborns from first age group: $size_per_ag, sum: $(sum(size_per_ag))")
+    @info "adjusted pop sizes (removed newborns from first age group: $size_per_ag, sum: $(sum(size_per_ag))"
+    
     # initialize the non-newborns first
     sz_non_newborns = sum(size_per_ag)
-    human_ages = rand.(inverse_rle(ages_per_ag, size_per_ag)) # vector of ages for each human
+    human_ages = rand.(inverse_rle(ages_per_ag, size_per_ag)) # vector of ages for each non-newborn human
     shuffle!(human_ages)
-    println("proportion of 0:4s that are 0 or 1: $(length(findall(x -> x <= 1, human_ages)))")
+    @info ("proportion of 0:4s that are 0 or 1 (but not marked as newborns): $(length(findall(x -> x <= 1, human_ages)))")
     idx = 0
     for i in 1:sz_non_newborns
         idx += 1 # we need to know when the loop ends so we know where to begin the next one for the babies
@@ -110,20 +172,19 @@ function initialize()
             # if its 30:730, that means there are newborns from before the simulation started -- this doesnt even matter, since 
         end
     end
-    println("pop assigned ageindays between 30-730 days: $(length(findall(x -> x.ageindays <= 730 && x.ageindays > 0, humans)))")
     
     # make sure no one has a monthassigned for being born
     newborns = findall(x -> x.monthborn >= 1, humans)
-    println("agents with month assigned: $(length(newborns)) -- should be zero.")
+    @info "sanity check: humans with a monthborn property assigned (should be zero): $(length(newborns))"
  
     # probability of preterm 
     prob_gestation = Categorical([0.07, 0.17, 0.76]) # 1 = <29, 2 = 29-32 weeks, 3 = 33-36 weeks
 
     # next initialize the newborns (2 years worth) -- use two loops to do two years
-    sz_newborns = sum(babies_per_month)
+    sz_newborns = sum(babies_per_month)  # this is the total newborns PER YEAR, so run the loop twice
     for y in [:y1, :y2]
         month_idx = inverse_rle(1:12, babies_per_month) # for each baby, assign them a birth month 
-        println(countmap(month_idx))
+        @info "year: $y, distribution of newborns birth months $(countmap(month_idx)) "
         for i in 1:sz_newborns
             idx += 1 # we need to know when the loop ends so we know where to begin the next one for the babies
             humans[idx] = Human() 
@@ -143,16 +204,21 @@ function initialize()
                 x.preterm = true
                 x.gestation = rand(prob_gestation) 
             end
-           
         end
     end
 
-    # monthborn should only be for newborns that we are tracking
-
+    # @info some statistics for debug purposes
+        
+    
     newborns = findall(x -> x.monthborn >= 1, humans)
     newborns_tracked = findall(x -> x.monthborn >= 1 && x.newborn == true, humans)
-    println("total newborns: $(length(newborns)), tracked (should be half): $(length(newborns_tracked))")
-    return idx
+    preterm = findall(x -> x.monthborn >= 1 && x.preterm == true, humans)
+    preterm_tracked = findall(x -> x.monthborn >= 1 && x.preterm == true && x.newborn == true, humans)
+    gestperiods = [humans[x].gestation for x in preterm_tracked]
+    @info ("total newborns: $(length(newborns)), tracked: $(length(newborns_tracked))")
+    @info ("total preterm: $(length(preterm)), tracked: $(length(preterm_tracked))")
+    @info ("gestation periods distribution $(countmap(gestperiods)), total: $(length(gestperiods))")
+    return length(newborns_tracked)
 end
 
 function household() 
@@ -171,8 +237,8 @@ function household()
     household_sizes[1] = single_adults 
     prop_household_sizes = household_sizes ./ sum(household_sizes) 
 
-    println("total adults: $(length(adult_indices)), grandparents: $(length(grand_indices)), children: $(length(child_indices))")
-    println("population (size) in households $(household_sizes .* [1, 1, 3, 4, 5]), total sum: $(sum(household_sizes .* [1, 1, 3, 4, 5]))")
+    @info ("total adults: $(length(adult_indices)), grandparents: $(length(grand_indices)), children: $(length(child_indices))")
+    @info ("population (size) in households $(household_sizes .* [1, 1, 3, 4, 5]), total sum: $(sum(household_sizes .* [1, 1, 3, 4, 5]))")
     
     # all data from Ontario census
     # go through children and determine whether they have two parents (a couple) or a lone parent 
@@ -193,8 +259,8 @@ function household()
     prop_families_with_1_child = round(families_with_1_child / totalfamilies, digits=3)  # from census data 
     prop_families_with_3_child = round(families_with_3_child / totalfamilies, digits=3)  # from census data 
 
-    println("total families from census: $_totalfamilies")
-    println("fam with 1 child: $families_with_1_child ($prop_families_with_1_child%), 1: $families_with_1_child ($prop_families_with_1_child%), 3: $families_with_3_child ($prop_families_with_3_child %) => total families: $totalfamilies")
+    @info ("total families from census: $_totalfamilies")
+    @info ("fam with 1 child: $families_with_1_child ($prop_families_with_1_child%), 1: $families_with_1_child ($prop_families_with_1_child%), 3: $families_with_3_child ($prop_families_with_3_child %) => total families: $totalfamilies")
   
     prop_couples_with_1_child = couples_with_1_child / families_with_1_child
     prop_couples_with_1_child = couples_with_1_child / families_with_1_child
@@ -290,12 +356,12 @@ end
 function activate_newborns(mth) 
     # for a given month, this function activates newborns so they can go through the aging process
     # non-activated newborns are not aged 
-    @info "activating newborns"
     nb_idx = findall(x -> x.monthborn == mth, humans) 
     for i in nb_idx 
         x = humans[i] 
         x.activeaging = true # turn on aging 
     end
+    return length(nb_idx)
 end
 
 function within_3_month(x, mth)
@@ -330,12 +396,11 @@ function get_monthly_agegroup_infcnt()
     # _rates_per_age = @SVector [0.051, 0.147, 0.111, 0.119, 0.166, 0.145, 0.016, 0.046, 0.053, 0.064, 0.071]
 
     # get medically attended (MA) counts per year/season
-    rates_per_agegroup = @SVector [0.051, 0.147, 0.111, 0.119, 0.166] # <19 d, 19–89 d, 90d to <6mo, 6mo to <1yr, 1 to < 1 yr
+    rates_per_agegroup = @SVector [0.051, 0.147, 0.111, 0.119, 0.166] # <19 d, 19–89 d, 90d to <6mo, 6mo to <1yr, 1 to <2 yr
     yearly_incidence = rand(Uniform(1001, 2439)) # yearly incidence sampled from a range -- this is for ALL age groups
     yearly_incidence_per_ag = yearly_incidence * rates_per_agegroup # split the yearly counts to the age groups we are interested in 
     sum_incidence_per_ag = sum(yearly_incidence_per_ag) # add up incidence for selected age groups only 
-    @info ("yearly sampled MA: $yearly_incidence")
-    @info ("yearly MA per age group:\n $yearly_incidence_per_ag, \ntotal incidence (over 5 age grps): $(sum_incidence_per_ag)")
+    @info ("yearly sampled MA: $yearly_incidence \nyearly MA per age group:\n $yearly_incidence_per_ag, \ntotal incidence (over 5 age grps): $(sum_incidence_per_ag)")
     
     # get non-medically (N-MA) (symptomatic) counts -- it's basically the MA increased by some percentage
     nma_range = rand(Uniform(0.15, 0.30)) # percentage of symptomatic (non-medical attended)
@@ -343,12 +408,11 @@ function get_monthly_agegroup_infcnt()
     nma_rates_per_agegroup = @SVector [0, 0.011, 0.043, 0.185, 0.761] # split the non-medically attended counts over age groups - given by Seyed 
     yearly_nma_per_ag = nma_incidence * nma_rates_per_agegroup 
     
-    @info ("total sampled N-MA: $nma_incidence")
-    @info ("yearly N-MA per age group:\n $yearly_nma_per_ag, \ntotal incidence (over 5 age grps): $(sum(yearly_nma_per_ag))")
+    @info ("total sampled N-MA: $nma_incidence \nyearly N-MA per age group:\n $yearly_nma_per_ag, \ntotal incidence (over 5 age grps): $(sum(yearly_nma_per_ag))")
     
-    # as a check, see how many babies we have
+    # as a check, see how many infants we have and compare against how many rsv infections we need to distribute
     _cr = length(findall(x -> x.ageindays <= 730, humans)) 
-    @info ("sanity check: total children at risk: $_cr, total incidence to distribute: $(sum(yearly_incidence_per_ag) + sum(yearly_nma_per_ag))")
+    @info "sanity checks \ntotal children at risk: $_cr, \ntotal incidence to distribute: $(sum(yearly_incidence_per_ag) + sum(yearly_nma_per_ag))"
 
     # the distribution of yearly cases to monthly cases (starting at January) 
     # this works for both MA and N-MA cases
@@ -366,14 +430,11 @@ function get_monthly_agegroup_infcnt()
     monthly_agegroup_incidence = Int.(ceil.(transpose(hcat(_monthly_inc...))))
     _monthly_nma = @. (yearly_nma_per_ag * month_distr)
     monthly_agegroup_non_ma = Int.(ceil.(transpose(hcat(_monthly_nma...))))
-    display(monthly_agegroup_incidence)
+    @info "monthly incidence (MA and N-MA)" monthly_agegroup_incidence monthly_agegroup_non_ma
 
-    println("yearly incidence (N-MA) split into months per age group:")
-    display(monthly_agegroup_non_ma)
-
-    # to do: 
-    println("total (theoretical) monthly incidence (MA) across age groups: \n$(round.(sum(monthly_agegroup_incidence, dims=1)))")
-    println("total (theoretical) monthly incidence (N-MA) across age groups: \n$(round.(sum(monthly_agegroup_non_ma, dims=1)))")
+    
+    @info "return values \nmonthly incidence (MA, N-MA) across age groups:" round.(sum(monthly_agegroup_incidence, dims=1)) round.(sum(monthly_agegroup_non_ma, dims=1))
+    
     return monthly_agegroup_incidence, monthly_agegroup_non_ma
 end 
 
@@ -387,14 +448,17 @@ function incidence()
     # benefit here is that both seasons have their own stochasticity
     # after the concatenation, the matrix is 5x14 (5 age groups x 14 months)
     yr1_monthly_agegroup_incidence, yr1_monthly_agegroup_non_ma = get_monthly_agegroup_infcnt()
-    yr1_monthly_agegroup_incidence, yr1_monthly_agegroup_non_ma = get_monthly_agegroup_infcnt()    
-    monthly_agegroup_incidence = hcat(yr1_monthly_agegroup_incidence, yr1_monthly_agegroup_incidence)
-    monthly_agegroup_non_ma = hcat(yr1_monthly_agegroup_non_ma,yr1_monthly_agegroup_non_ma)
+    yr2_monthly_agegroup_incidence, yr2_monthly_agegroup_non_ma = get_monthly_agegroup_infcnt()    
+    monthly_agegroup_incidence = hcat(yr1_monthly_agegroup_incidence, yr2_monthly_agegroup_incidence)
+    monthly_agegroup_non_ma = hcat(yr1_monthly_agegroup_non_ma, yr2_monthly_agegroup_non_ma)
     
+    @info "total infections to distribute" sum(monthly_agegroup_incidence)+sum(monthly_agegroup_non_ma) 
+ 
+
     # loop through months: Order is April => 1, May => 2, etc (verify that the vectors used to inject babies and sample monthly counts are in the right order!) 
     for mth in 1:24
-        @info "simulating month: $mth"
-        activate_newborns(mth) 
+        _acnb = activate_newborns(mth) 
+        @info "simulating month: $mth, activating: $_acnb newborns"
 
         # eligble children (0 - 730 days of age) split into 5 age groups (because the counts are sampled over these five age groups)
         ag1_idx = findall(x -> x.ageindays > 0  && x.ageindays <= 30 && within_3_month(x, mth) && x.monthborn == mth, humans) 
@@ -408,22 +472,21 @@ function incidence()
         ma_to_distr = monthly_agegroup_incidence[:, mth]
         nma_to_distr = monthly_agegroup_non_ma[:, mth]
 
-        @info """ incidence cnts to be sampled--  MA: $ma_to_distr, N-MA: $nma_to_distr
-        num of babies in our system: $(length.(ag_idx))
-        """
+        @info "incidence cnts to be sampled: \nMA: $(ma_to_distr)  \nN-MA: $nma_to_distr \nnum of babies in our system: $(length.(ag_idx))"
         
-        # to understand whats happening here: run this command: sample.([[1, 1, 3, 4, 5], [11, 11, 13, 14, 15]], [1, 3], replace=false)
-        # when we sample, we combine the MA and N-MA together but then split it later according to the counts
+        # this statement samples from each agegroup the number of MA/N-MA individuals, this then creates an array of array.
+        # i.e. sampled_idx_to_be_sick[1] is the indices of people from ag1 that will be sick 
+        # i.e. sampled_idx_to_be_sick[2] is the indices of people from ag2 that will be sick
+        # we combine the MA and N-MA together but then split it later according to the counts
+        # understand the sample function by running this command: sample.([[1, 1, 3, 4, 5], [11, 11, 13, 14, 15]], [1, 3], replace=false)
         sampled_idx_to_be_sick = sample.(ag_idx, ma_to_distr .+ nma_to_distr, replace=false)
-        #ag_sick = vcat(_ag_sick...)     # now we list of IDs that need to be infected, we don't care about the structure (which at this stage is an array or arrays)
-        #println("total (sampled) monthly infected across age groups: $(length(ag_sick))")
-        
-        ## at this point, drop all ag_sick indices from ag1_idx
+        #display(sampled_idx_to_be_sick)
 
+        # go through each age group, and within each )
         for (idx, ag_sick_ids) in enumerate(sampled_idx_to_be_sick)
-            # ag_sick is the array of indices of agents to make sick (but they are combined between MA and N-MA)
-            # ag_idx is the age group from 1 to 5 
-            # generate a pre-list of whether individual is MA = 1 or N-MA = 2
+            # ag_sick_ids is the array of indices of agents to make sick (but they are combined between MA and N-MA)
+            # idx is the age group from 1 to 5 
+            # generate a pre-list of whether individual is MA = 1 or N-MA = 2 based on the distribution sampled from above
             sick_type_lst = inverse_rle([1, 2], [ma_to_distr[idx], nma_to_distr[idx]])
             for i in ag_sick_ids 
                 h = humans[i]
@@ -439,30 +502,21 @@ function incidence()
         increase_age()
     end
     # error check, all newborns should be activated
-    println("newborns not activated (should be zero): $(length(findall(x -> x.newborn == true && x.activeaging == false, humans)))")
+    @info "newborns not activated (should be zero): $(length(findall(x -> x.newborn == true && x.activeaging == false, humans)))"
     return totalsick
 end    
-
-# TO DO 
-# record deaths 
-# create counters for outcome_flow to record number of icu/ward/outpatient visits
 
 function maternal_vaccine(coverage=0.60) 
     # all newborns get maternal vaccine with some coverage
     newborns = findall(x -> x.newborn == true && rand() < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
+    total_cost = length(newborns) * 100
     
     # define efficacy values over 12 months from time of administration
     eff_outp = [72, 63, 49, 34, 23, 16, 13, 11, 10, 0, 0, 0] ./ 100
-    eff_ward = [93, 82, 69, 56, 43, 32, 24, 19, 15, 0, 0, 0] ./ 100
+    eff_hosp = [93, 82, 69, 56, 43, 32, 24, 19, 15, 0, 0, 0] ./ 100
     eff_icu = [93, 82, 69, 56, 43, 32, 24, 19, 15, 0, 0, 0] ./ 100
-
-    for (i, h) in enumerate(newborns)   
-        # initialize empty vectors for each newborn for 24 months (these are their efficacy values for each month)
-        # depending on monthborn, the zeros are placed with the theoretical efficacy value
-        eo = zeros(Float64, 24) 
-        ew = zeros(Float64, 24) 
-        ei = zeros(Float64, 24) 
-        
+    
+    for (i, h) in enumerate(newborns)          
         x = humans[h]
         mb = x.monthborn
         # a quick error check
@@ -470,35 +524,45 @@ function maternal_vaccine(coverage=0.60)
         fm = mb 
         em = fm + 11
         x.eff_outpatient[fm:em] .= eff_outp
-        x.eff_ward[fm:em] .= eff_ward
+        x.eff_hosp[fm:em] .= eff_hosp
         x.eff_icu[fm:em] .= eff_icu
+        x.vac_mat = true # set flag to true to indicate newborn is maternally vaccinated
     end
-    println("selected newborns: $(length(newborns))")
-    println("maternal vaccine, coverage value: $coverage")
+    @info "number of newborns for MI and cost" length(newborns), total_cost
+    return total_cost
 end
 
-function lama_vaccine(coverage = 0.90, strat="strat1") 
+function lama_vaccine(coverage = 0.90, strat="strat3") 
+    # error check... maternal vaccine should always come first  
+    # TO DO
+    
     # (i) vaccination of preterm infants under 32 wGA with 90% coverage (S1); 
     # (ii) vaccination of all preterm infants with 90% coverage (S2) in addition to S1; 
     # (iii) vaccination of all infants with 90% coverage
+    
     if strat == "strat1" 
         newborns = findall(x -> x.newborn == true && x.gestation in (1, 2) && rand() < coverage, humans) # 1 = <29, 2 = 29-32 weeks, 3 = 33-36 weeks
+        total_cost = length(newborns) * 1000 
     elseif strat == "strat2"
         newborns = findall(x -> x.newborn == true && x.preterm == true && rand() < coverage, humans) ## all preterm, regardless of gestation
+        total_cost = length(newborns) * 1000
     elseif strat == "strat3" 
         _newborns_preterm = findall(x -> x.newborn == true && x.preterm == true && rand() < 0.90, humans)
         _newborns_fullterm = findall(x -> x.newborn == true && x.preterm == false && rand() < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
-        newborns = [_newborns_preterm, _newborns_fullterm]
+        newborns = [_newborns_preterm..., _newborns_fullterm...]
+
+        # in this strategy the cost is of all newborns regardless of who is administered the 
+        _nc = findall(x -> x.newborn == true, humans)
+        total_cost = length(_nc) * 500
     else 
         error("wrong strategy for lama vaccination")
     end
 
     # theoretical efficacies
     eff_outp = [100, 96, 87, 70, 50, 33, 23, 19, 17, 0, 0, 0] ./ 100
-    eff_ward = [100, 95, 84, 67, 47, 31, 22, 18, 16, 0, 0, 0] ./ 100
+    eff_hosp = [100, 95, 84, 67, 47, 31, 22, 18, 16, 0, 0, 0] ./ 100
     eff_icu = [100, 97, 91, 80, 64, 47, 33, 24, 20, 0, 0, 0] ./ 100
 
-    cnt = 0 # counter to keep track of how many newborns vaccinated
     for (i, h) in enumerate(newborns)    
         x = humans[h]
         mb = x.monthborn
@@ -507,49 +571,39 @@ function lama_vaccine(coverage = 0.90, strat="strat1")
         fm = max(7, mb)
         em = fm + 11
         x.eff_outpatient[fm:em] .= eff_outp
-        x.eff_ward[fm:em] .= eff_ward
+        x.eff_hosp[fm:em] .= eff_hosp
         x.eff_icu[fm:em] .= eff_icu
+        x.vac_lama = true # set flag to true to indicate newborn is vaccinated by lama
     end
-end
-
-function vaccine_debug() 
-    # debug -- save data in a file to check for bugs 
-    _data = zeros(Float64,  25, length(newborns)) # one column for month born + 24 months of efficacy
-    aa = [humans[x].monthborn for x in newborns]
-    bb = hcat([humans[x].eff_outpatient for x in newborns]...)
-    cc = [aa bb']
-    writedlm("vaccine_test.csv", cc, ",")
-    cc
+    @info "number of newborns for LAMA and cost" length(newborns), total_cost
+    return total_cost
 end
 
 function outcome_flow(x) 
-    # sample the potential outcomes for sick newborn
+    # this function determines the outcomes of rsv infants accounting for vaccine/no vaccine
 
-    # to do: ICU, death is fullterm/preterm specific
-
+    # setup fixed distributions
     prob_inpatient_fullterm = [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] ./ 100
-    prob_inpatient_preterm_1 = [6.06, 11.22, 6.96, 4.95, 4.275, 2.85, 2.49, 2.61, 1.965, 2.235, 1.83, 1.62] ./ 100 
-    prob_inpatient_preterm_2 = [4.04, 7.48, 4.64, 3.3, 2.85, 1.9, 1.66, 1.74, 1.31, 1.49, 1.22, 1.08] ./ 100
-    prob_inpatient_preterm_3 = [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] ./ 100
+    prob_inpatient_preterm_1 =  [6.06, 11.22, 6.96, 4.95, 4.275, 2.85, 2.49, 2.61, 1.965, 2.235, 1.83, 1.62] ./ 100 
+    prob_inpatient_preterm_2 =  [4.04, 7.48, 4.64, 3.3, 2.85, 1.9, 1.66, 1.74, 1.31, 1.49, 1.22, 1.08] ./ 100
+    prob_inpatient_preterm_3 =  [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] ./ 100
+
     prob_inpatient_preterm = [prob_inpatient_preterm_1, prob_inpatient_preterm_2, prob_inpatient_preterm_3]
-    
     prob_wheezing = 0.31 # will have to sample duration for cost-effectiveness 
     prob_emergencydept = rand(Uniform(0.4, 0.5))
-
     days_symptomatic_distr = Uniform(5, 8) 
 
     # create empty array to store the flow of outcomes
     flow = String[]
    
-    # check if second infection happens within 12 months
+    # check if second infection happens within 12 months -- this check is extra security incase the x argument is not properly filtered
     infcnt_max = 1 # we know there is one infection minimum
     if x.rsvpositive == 2 # if 2 symptomatic episodes, check whether it happens within 12 months 
         diff = x.rsvmonth[2] - x.monthborn[1]
         infcnt_max = diff <= 11 ? 2 : 1
     end
-    println("infcnt: $infcnt_max")
 
-    # A dict to hold sampled values as they are being calculated
+    # A dictionary to hold outcome specific values as they are being calculated
     sampled_days = Dict(
         "prior_to_infection" => 0., 
         "after_infection" => 0., 
@@ -557,29 +611,48 @@ function outcome_flow(x)
         "pediatricward" => 0., 
         "icu" => 0., 
         "wheezing" => 0., 
-        "emergencydept" => 0.,  # these two only really used for cost purposes... not for QALYs
-        "office_consultation" => 0
+        "emergencydept" => 0.,  # binary 0/1 these two only really used for cost purposes... not for QALYs
+        "office_consultation" => 0, # binary 0/1
+        "death" => 0 # binary 0/1
     )
 
     # insert the number of days prior to first infection
     sampled_days["prior_to_infection"] += (x.rsvmonth[1] - x.monthborn) * 30
     
-    for ic in 1:infcnt_max 
-        
-        # for each infection, determine their probability of inpatient based on when infection happens (i.e, how many months after birth)
-        distr = x.preterm ? prob_inpatient_preterm[x.gestation] : prob_inpatient_fullterm
-        diff = (x.rsvmonth[ic] - x.monthborn) + 1 # the prob of inpatient depends on when infection happens after birth
-        prob_inpatient = distr[diff]
-
-        # for each infection, determine probabilty of ICU and death, depends on preterm or not.
-        prob_icu = x.preterm ? 0.154 : 0.13
-        _prob_recoveries = [0.081, 0.033, 0.033]
-        prob_recovery = x.preterm ? _prob_recoveries[x.gestation] : 0.005
-        
+    for ic in 1:infcnt_max  
+        push!(flow, "INF$ic")
         days_symptomatic = rand(days_symptomatic_distr)
         sampled_days["symptomatic"] += days_symptomatic
+        push!(flow, "Symptomatic")
 
-        if rand() < prob_inpatient && x.rsvtype[ic] == 1  ## a non-medical attended person can not be inpatient... only symptomatic
+        rt = x.rsvtype[ic]
+        rm = x.rsvmonth[ic]
+
+        !(rt in (1, 2)) && error("RSV type incorrect, required 1 or 2... given: $rt") # quick error check
+        rt == 2 && continue ## a non-medical attended person can not be inpatient... only symptomatic, so skip the remaining branches (only count symptomatic days)
+            
+        # first efficacy endpoint, against outpatient/inpatient (i.e. MA) 
+        # i.e., essentially turns a MA infant to a N-MA infant 
+        # if coin toss is true a MA patient essentially becomes a N-MA and we dont need to run the remaining if statements
+        rand() < x.eff_outpatient[rm] && continue # get the outpatient efficacy  at the time of infection, don't need the 1 - efficacy in this case
+         
+        # at this point the infant is MA and will either be an outpatient or inpatient 
+        # probability of inpatient (and ICU) depends on month of infection (i.e, how many months after birth) AND preterm/gestational period
+        # this probability is adjusted by vaccine efficacy
+        distr = x.preterm ? prob_inpatient_preterm[x.gestation] : prob_inpatient_fullterm
+        diff = (rm - x.monthborn) + 1 # the prob of inpatient depends on when infection happens after birth
+        prob_inpatient = distr[diff] * (1 - x.eff_hosp[rm])    
+       
+        # probability of ICU is also adjusted by efficacy.
+        prob_icu = x.preterm ? 0.154 : 0.13
+        prob_icu = prob_icu * (1 - x.eff_icu[rm])
+       
+        # probability of recovery/death -- not affected by vaccine (already accounted for in other efficacy end points)
+        _prob_recoveries = [0.081, 0.033, 0.033]
+        prob_recovery = x.preterm ? _prob_recoveries[x.gestation] : 0.005
+
+        # outpatient, ward, and icu
+        if rand() < prob_inpatient             
             push!(flow, "inpatient")
             if rand() < prob_icu 
                 push!(flow, "icu")
@@ -588,7 +661,7 @@ function outcome_flow(x)
                 push!(flow, "pediatric ward")
                 sampled_days["pediatricward"] += x.gestation in (1, 2) ? rand(Gamma(12.71, 0.48)) : rand(Gamma(6.08, 0.64)) 
             end
-            if rand() < prob_recovery  # after ICU or PedWard, check if recovered or death 
+            if rand() < (1 - prob_recovery)  # after ICU or PedWard, check if recovered or death 
                 push!(flow, "recovery")
                 if rand() < prob_wheezing # wheezing episode
                     push!(flow, "wheezing")
@@ -596,14 +669,15 @@ function outcome_flow(x)
                 end
             else 
                 push!(flow, "death")
+                sampled_days["death"] += 1
             end
         else # is either office ot ED
-            push!(flow, "outpatient")  
+            push!(flow, "outpatient")
             if rand() < prob_emergencydept
                 push!(flow, "ED")
                 sampled_days["emergencydept"] += 1
             else 
-                push!(flow, "office")
+                push!(flow, "Office")
                 sampled_days["office_consultation"] += 1
             end
         end
@@ -612,56 +686,71 @@ function outcome_flow(x)
     sampled_days["after_infection"] += 365 - sum(values(sampled_days))
 
     # print statistics
-    println("")
-    println(join(flow, " => "))
-    println("")
-    display(sampled_days)
-    println("total days: $(sum(values(sampled_days)))")
+    # println("")
+    # println(join(flow, " => "))
+    # println("")
+    # println("total days: $(sum(values(sampled_days)))")
 
-    return sampled_days # return the number of days in each outcome state
+    return sampled_days, flow # return the number of days in each outcome state
 end
 
-function f2()
-    # find all newborns that had symptomatic epideo
+function outcome_analysis()
+    # find all newborns that had atleast one symptomatic episode in their first year of life
     newborns = findall(x -> x.newborn == true && x.rsvpositive > 0 && (x.rsvmonth[1] - x.monthborn) <= 11, humans)
-    println("\ntotal rsv positive newborns: $(length(newborns))")
+    _nbpos = findall(x -> x.newborn == true && x.rsvpositive > 0, humans) #sanity check
+    @info "\ntotal rsv positive newborns: $(length(_nbpos)) \nthose with first infection in first year:$(length(newborns))"
 
-    # create the QALY distributions (disutility)
+    # create QALY distributions (disutility)
     qaly_prior_to_infection = Beta(19.2, 364.6)
     qaly_symptomatic = Beta(53.6, 281.4)
     qaly_pediatricward = Beta(109.7, 157.9)
     qaly_icu = Beta(159.4, 106.2)
     qaly_wheezing = Beta(14.1, 338.4)
 
+    data = []
+    qalyslost = Float64[]
+    qalyslost_death = Float64[] # separate the qalys lost (and cost) due to death... since they are not counted in the government perspective
+    totalcosts = Float64[] 
+    totalcosts_death = Float64[]
+    total_inpatients = 0 
+    total_outpatients = 0
+
+
     for (i, h) in enumerate(newborns) 
         x = humans[h]   
-        println(h)
-        break
-        dump(x)
-        sampled_days = outcome_flow(x)
+        sampled_days, flow = outcome_flow(x)  # simulate outcomes for the RSV infant
+        @info "flow chart for id $i: $(join(flow, " => "))" 
         # A dict to hold qaly values as they are being calculated
         qalys = Dict(
-            "prior_to_infection" => 0., 
-            "after_infection" => 0., 
-            "symptomatic" => 0., 
-            "pediatricward" => 0., 
-            "icu" => 0., 
-            "wheezing" => 0., 
+            "q_prior_to_infection" => 0., 
+            "q_after_infection" => 0., 
+            "q_symptomatic" => 0., 
+            "q_pediatricward" => 0., 
+            "q_icu" => 0., 
+            "q_wheezing" => 0., 
+            "q_death" => 0.
         )
-        sm = rand(qaly_prior_to_infection)   
-        qalys["prior_to_infection"] =  sampled_days["prior_to_infection"] / 365 * sm 
-        qalys["after_infection"] = sampled_days["after_infection"] / 365 * sm
-        qalys["symptomatic"] = sampled_days["symptomatic"] / 365 * rand(qaly_symptomatic)
-        qalys["pediatricward"] = sampled_days["pediatricward"] / 365 * rand(qaly_pediatricward)
-        qalys["icu"] = sampled_days["icu"] / 365 * rand(qaly_icu)
-        qalys["wheezing"] = sampled_days["wheezing"] / 365 * rand(qaly_wheezing)
+        sm = rand(qaly_prior_to_infection) # use this distribution for both prior and after infection qalys
+        #qalys["q_prior_to_infection"] = sampled_days["prior_to_infection"] / 365 * sm 
+        #qalys["q_after_infection"] = sampled_days["after_infection"] / 365 * sm
+        qalys["q_symptomatic"] = sampled_days["symptomatic"] / 365 * rand(qaly_symptomatic)
+        qalys["q_pediatricward"] = sampled_days["pediatricward"] / 365 * rand(qaly_pediatricward)
+        qalys["q_icu"] = sampled_days["icu"] / 365 * rand(qaly_icu)
+        qalys["q_wheezing"] = sampled_days["wheezing"] / 365 * rand(qaly_wheezing)
+        qalys["q_death"] = sampled_days["death"] * 45.3
         
-        #display(qalys)
-        println("Total QALY decrement: $(sum(values(qalys))), QALY decrement (RSV): $(qalys["after_infection"] + qalys["symptomatic"] + qalys["pediatricward"] + qalys["icu"] + qalys["wheezing"]) QALY: $(1 - sum(values(qalys))) ")
-    
-        cost_in_icu = 3638 * sampled_days["icu"] # 10, 2 symptomatics
-        cost_in_ward = 1491 * sampled_days["pediatricward"]
-        cost_hosp_followup = begin 
+        costs = Dict(
+            "cost_in_icu" => 0., 
+            "cost_in_ward" => 0., 
+            "cost_hosp_followup" => 0., 
+            "cost_wheezing" => 0., 
+            "cost_outpatient" => 0., 
+            "cost_death" => 0.
+        )
+
+        costs["cost_in_icu"] = 3638 * sampled_days["icu"] # 10, 2 symptomatics
+        costs["cost_in_ward"] = 1491 * sampled_days["pediatricward"]
+        costs["cost_hosp_followup"] = begin 
             cost_followup = 0 
             if (sampled_days["icu"] + sampled_days["pediatricward"]) > 0 
                 diff1 = x.rsvmonth[1] - x.monthborn
@@ -687,37 +776,42 @@ function f2()
                         cost_followup += 374
                     end
                 end
-                
             end
             cost_followup
         end
-        cost_wheezing = begin 
+        costs["cost_wheezing"] = begin 
             cw = 0 
             if sampled_days["wheezing"] > 0
-                cw = sampled_days["wheezing"] > 10 ? (229 * 2) : 229
+                cw = sampled_days["wheezing"] > 10 ? (229 * 2) : 229 # a little trick to see if there were two wheezing episodes (since max of one episode is 9.8)
             end
             cw
         end
-        cost_outpatient = (sampled_days["emergencydept"] * 342) + (sampled_days["office_consultation"] * 229) 
-    
-        println("cost_in_icu: $cost_in_icu, 
-        cost_in_ward: $cost_in_ward, \
-        hosp followup: $cost_hosp_followup, 
-        cost_wheezing: $cost_wheezing,  
-        cost outpatient: $cost_outpatient")
+        costs["cost_outpatient"] = (sampled_days["emergencydept"] * 342) + (sampled_days["office_consultation"] * 229) 
+        costs["cost_death"] = sampled_days["death"] * 2292572
+        
+        total_inpatients += (sampled_days["icu"] + sampled_days["pediatricward"]) > 0  
+        total_outpatients += (sampled_days["emergencydept"] + sampled_days["office_consultation"]) > 0  
 
-        # SAVE EVERYTHING AS TUPLE 
-        (;x.idx, x.monthborn, x.preterm, split_infections..., )
+        # save individual level + totals data
+        push!(qalyslost, qalys["q_symptomatic"] + qalys["q_pediatricward"], qalys["q_icu"], qalys["q_wheezing"])
+        push!(qalyslost_death, qalys["q_death"])
+        push!(totalcosts, costs["cost_in_icu"] + costs["cost_in_ward"] + costs["cost_hosp_followup"] + costs["cost_wheezing"] + costs["cost_outpatient"])
+        push!(totalcosts_death, costs["cost_death"])
+        qaly_tup = NamedTuple(Symbol(k) => v for (k,v) in qalys)
+        cost_tup = NamedTuple(Symbol(k) => v for (k,v) in costs)
+        push!(data, (;x.idx, x.monthborn, x.preterm, x.vac_lama, x.vac_mat, infection_tup(x)..., qaly_tup..., cost_tup...))
+        #display(qalys)
     end
    
-
-    # save everything to a dataframe
-    
-    #     nb_data[i] = (;x.idx, x.monthborn, x.preterm, rsvmonth1, rsvage1, rsvtype1, rsvmonth2, rsvage2, rsvtype2)
-  
+    # save simulation specific data as a csv file for debug purposes later
+    #df = DataFrame(data) 
+    #CSV.write("./output/sim_$(randstring(5)).csv", df)
+    #return qalyslost
+    return length(newborns), sum(qalyslost), sum(qalyslost_death), sum(totalcosts), sum(totalcosts_death), total_inpatients, total_outpatients
 end
 
-function split_infections(x) 
+
+function infection_tup(x) 
     rsvmonth1 = x.rsvmonth[1]
     rsvage1 = x.rsvage[1]
     rsvtype1 = x.rsvtype[1]
@@ -733,41 +827,5 @@ function split_infections(x)
             rsvtype2 =  x.rsvtype[2] 
         end
     end
-    (; rsvmonth1, rsvage1, rsvtype1, rsvmonth2, rsvage2, rsvtype2)
+    (; rsvmonth1, rsvtype1, rsvmonth2, rsvtype2)
 end
-
-# function save_simulation() 
-#     nb = findall(x -> x.newborn == true && x.rsvpositive > 0, humans)
-#     nb_data = Array{NamedTuple{(:idx, :monthborn, :preterm, :rsvmonth1, :rsvage1, :rsvtype1, :rsvmonth2, :rsvage2, :rsvtype2), Tuple{Int64, Int64, Bool, Int64, Int64, Int64, Int64, Int64, Int64}}}(undef, length(nb))
-
-#     println("nb sick: $(length(nb))")
-
-#     for (i, hid) in enumerate(nb)
-#         x = humans[hid] 
-
-#         # test, make sure activeaging == true 
-#         rsvmonth1 = x.rsvmonth[1]
-#         rsvage1 = x.rsvage[1]
-#         rsvtype1 = x.rsvtype[1]
-
-#         rsvmonth2 = -99
-#         rsvage2 = -99
-#         rsvtype2 = -99
-#         if x.rsvpositive == 2 # if 2 symptomatic episodes, check whether it happens within 12 months 
-#             diff = x.rsvmonth[2] - x.rsvmonth[1]
-#             if diff <= 11 
-#                 rsvmonth2 = x.rsvmonth[2] 
-#                 rsvage2 = x.rsvage[2]
-#                 rsvtype2 =  x.rsvtype[2] 
-#             else    
-#                 @info "id: $hid - two infections > 12 months"
-#             end
-#         end
-#         nb_data[i] = (;x.idx, x.monthborn, x.preterm, rsvmonth1, rsvage1, rsvtype1, rsvmonth2, rsvage2, rsvtype2)
-#         #
-#     end
-#     df = DataFrame(nb_data) 
-#     println(countmap(df.monthborn))
-#     CSV.write("rsv_sim_data.csv", df)
-#     return df
-# end
