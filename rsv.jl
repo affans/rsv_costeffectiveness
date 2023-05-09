@@ -5,6 +5,7 @@ using IterTools
 using Base.Filesystem
 using CSV, DataFrames
 using Match
+using Logging, ProgressMeter
 
 # define an agent and all agent properties
 Base.@kwdef mutable struct Human
@@ -36,6 +37,7 @@ Base.@kwdef mutable struct ModelParameters    ## use @with_kw from Parameters
     modeltime::Int64 = 300
 end
 
+const rng = MersenneTwister(422) # create a random number object... this is only for use in the vaccine functions
 const humans = Array{Human}(undef, 0) 
 const p = ModelParameters()  ## setup default parameters
 const ON_POP = 13448500 # 13448495 from ontario database, but their numbers don't add up
@@ -47,51 +49,47 @@ function main()
     reset_params()  # reset the parameters for the simulation scenario    
     nb = initialize() 
     tf = incidence()
-    vc = vaccine_scenarios(:s0) 
-    nbs, ql, rc, inpats, outpats = outcome_analysis()
+    vc = vaccine_scenarios(:s0) # s0 no vaccine
+    nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis()
 end
 
 function simulations() 
-    println("running simulations")
-   
+    println("starting simulations")
     reset_params()  # reset the parameters for the simulation scenario    
     
+    # get a log file for simulations only -- save all the @info statement to files
     io = open("log.txt", "w")
     logger = SimpleLogger(io)
     global_logger(logger)
    
-    num_of_sims = 500
+    num_of_sims = 10
     scenarios = [:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7]
-    #scenarios = [:s0, :s1]
     all_data = []
-    for sc in scenarios 
-        sc_data = zeros(Float64, num_of_sims, 8)
+
+    Random.seed!(rng, abs(rand(Int16)))  # set the seed randomly for the vaccine functions
+
+    @showprogress for sc in scenarios 
+        sc_data = zeros(Float64, num_of_sims, 9)
         for i = 1:num_of_sims
-            #sc = :s0
-            println("sim $i")
-            Random.seed!(53 * i)
+            Random.seed!(53 * i) # for each simulation, set the seed so that the same number of newborns/preterms/incidence are sampled! 
             nb = initialize() 
             tf = incidence()
-            vc = vaccine_scenarios(sc) 
-            nbs, ql, qd, rc, dc, inpats, outpats = outcome_analysis()
-            sc_data[i,  :] .= [nbs, vc, rc, dc, ql, qd, inpats, outpats]
+            vc = vaccine_scenarios(sc) # this will use its own internal RNG so won't disturb the global RNG 
+            nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis() 
+            sc_data[i,  :] .= [nbs, vc, rc, dc, ql, qd, inpats, outpats, non_ma]
         end
         push!(all_data, sc_data)
     end
     flush(io)
     close(io)
-    #df = DataFrame(rt_data)
-    #unstack(df, [:sim, :rsv_newborns], :scenario, :vaccine_costs)
-    #all_data
-    # colnames 
-    colnames = ["_newborns", "_vaccinecost", "_rsvcost", "_deathcost", "_qalylost", "qalylost_death", "_inpatients", "_outpatients"]
+   
+    # generate colnames for Seyed's preferred format
+    colnames = ["_newborns", "_vaccinecost", "_rsvcost", "_deathcost", "_qalylost", "qalylost_death", "_inpatients", "_outpatients", "_non_ma"]
     scnames = string.(scenarios)
     dfnames = vcat([sc .* colnames for sc in scnames]...)
     
     df = DataFrame(hcat(all_data...), dfnames)
     CSV.write("output/rsv_simulations.csv", df)
-    #scnames .* colnames
-    #all_data
     return df
 end
 export main
@@ -508,7 +506,7 @@ end
 
 function maternal_vaccine(coverage=0.60) 
     # all newborns get maternal vaccine with some coverage
-    newborns = findall(x -> x.newborn == true && rand() < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
+    newborns = findall(x -> x.newborn == true && rand(rng) < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
     total_cost = length(newborns) * 100
     
     # define efficacy values over 12 months from time of administration
@@ -533,27 +531,23 @@ function maternal_vaccine(coverage=0.60)
 end
 
 function lama_vaccine(coverage = 0.90, strat="strat3") 
-    # error check... maternal vaccine should always come first  
-    # TO DO
-    
     # (i) vaccination of preterm infants under 32 wGA with 90% coverage (S1); 
     # (ii) vaccination of all preterm infants with 90% coverage (S2) in addition to S1; 
     # (iii) vaccination of all infants with 90% coverage
-    
     if strat == "strat1" 
-        newborns = findall(x -> x.newborn == true && x.gestation in (1, 2) && rand() < coverage, humans) # 1 = <29, 2 = 29-32 weeks, 3 = 33-36 weeks
+        newborns = findall(x -> x.newborn == true && x.gestation in (1, 2) && rand(rng) < coverage, humans) # 1 = <29, 2 = 29-32 weeks, 3 = 33-36 weeks
         total_cost = length(newborns) * 1000 
     elseif strat == "strat2"
-        newborns = findall(x -> x.newborn == true && x.preterm == true && rand() < coverage, humans) ## all preterm, regardless of gestation
+        newborns = findall(x -> x.newborn == true && x.preterm == true && rand(rng) < coverage, humans) ## all preterm, regardless of gestation
         total_cost = length(newborns) * 1000
     elseif strat == "strat3" 
-        _newborns_preterm = findall(x -> x.newborn == true && x.preterm == true && rand() < 0.90, humans)
-        _newborns_fullterm = findall(x -> x.newborn == true && x.preterm == false && rand() < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
+        _newborns_preterm = findall(x -> x.newborn == true && x.preterm == true && rand(rng) < 0.90, humans)
+        _newborns_fullterm = findall(x -> x.newborn == true && x.preterm == false && rand(rng) < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
         newborns = [_newborns_preterm..., _newborns_fullterm...]
 
-        # in this strategy the cost is of all newborns regardless of who is administered the 
+        # in this strategy the cost is of all newborns regardless of who is administered the vaccine
         _nc = findall(x -> x.newborn == true, humans)
-        total_cost = length(_nc) * 500
+        total_cost = length(_nc) * 150 # 550
     else 
         error("wrong strategy for lama vaccination")
     end
@@ -563,6 +557,7 @@ function lama_vaccine(coverage = 0.90, strat="strat3")
     eff_hosp = [100, 95, 84, 67, 47, 31, 22, 18, 16, 0, 0, 0] ./ 100
     eff_icu = [100, 97, 91, 80, 64, 47, 33, 24, 20, 0, 0, 0] ./ 100
 
+    # assign the efficacies to infants based on when they are born and when the vaccine is administered
     for (i, h) in enumerate(newborns)    
         x = humans[h]
         mb = x.monthborn
@@ -580,30 +575,37 @@ function lama_vaccine(coverage = 0.90, strat="strat3")
 end
 
 function outcome_flow(x) 
-    # this function determines the outcomes of rsv infants accounting for vaccine/no vaccine
+    # this function determines the outcomes of rsv infants
+    #  -- argument x: should be an initialized agent with *atleast ONE INFECTION*
 
-    # setup fixed distributions
+    # for all probability checks (for outcomes), use an agent-specific agent 
+    # this is because we want the outcomes to be same for each scenario (but inpatient/outpatient probabilities change due to vaccine) 
+    # we don't have to use this for SAMPLED_DAYS -- use the default RNG for that. 
+    rng2 = MersenneTwister(x.idx)
+
+    # setup fixed distributions for inpatient/outpatient, wheezing, and ED
     prob_inpatient_fullterm = [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] ./ 100
     prob_inpatient_preterm_1 =  [6.06, 11.22, 6.96, 4.95, 4.275, 2.85, 2.49, 2.61, 1.965, 2.235, 1.83, 1.62] ./ 100 
     prob_inpatient_preterm_2 =  [4.04, 7.48, 4.64, 3.3, 2.85, 1.9, 1.66, 1.74, 1.31, 1.49, 1.22, 1.08] ./ 100
     prob_inpatient_preterm_3 =  [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] ./ 100
-
     prob_inpatient_preterm = [prob_inpatient_preterm_1, prob_inpatient_preterm_2, prob_inpatient_preterm_3]
-    prob_wheezing = 0.31 # will have to sample duration for cost-effectiveness 
-    prob_emergencydept = rand(Uniform(0.4, 0.5))
-    days_symptomatic_distr = Uniform(5, 8) 
+    prob_wheezing = 0.31 
+    prob_emergencydept = rand(rng2, Uniform(0.4, 0.5))
+
+    days_symptomatic_distr = Uniform(5, 8) # distribution for the number of symptomatic days
 
     # create empty array to store the flow of outcomes
     flow = String[]
    
-    # check if second infection happens within 12 months -- this check is extra security incase the x argument is not properly filtered
-    infcnt_max = 1 # we know there is one infection minimum
-    if x.rsvpositive == 2 # if 2 symptomatic episodes, check whether it happens within 12 months 
+    # check if second episode happens within 12 months (we already know that the first episode for argument x is happening)
+    infcnt_max = 1 # we know there is minimum one episode 
+    if x.rsvpositive == 2 # if two symptomatic episodes, check whether it happens within 12 months 
         diff = x.rsvmonth[2] - x.monthborn[1]
         infcnt_max = diff <= 11 ? 2 : 1
     end
 
-    # A dictionary to hold outcome specific values as they are being calculated
+    # A dictionary to hold the sampled number of days for each outcome 
+    # for some parameters, the values are binary to indiciate event happened or not
     sampled_days = Dict(
         "prior_to_infection" => 0., 
         "after_infection" => 0., 
@@ -616,54 +618,51 @@ function outcome_flow(x)
         "death" => 0 # binary 0/1
     )
 
-    # insert the number of days prior to first infection
-    sampled_days["prior_to_infection"] += (x.rsvmonth[1] - x.monthborn) * 30
-    
     for ic in 1:infcnt_max  
         push!(flow, "INF$ic")
         days_symptomatic = rand(days_symptomatic_distr)
         sampled_days["symptomatic"] += days_symptomatic
         push!(flow, "Symptomatic")
 
-        rt = x.rsvtype[ic]
+        rt = x.rsvtype[ic] 
         rm = x.rsvmonth[ic]
 
         !(rt in (1, 2)) && error("RSV type incorrect, required 1 or 2... given: $rt") # quick error check
-        rt == 2 && continue ## a non-medical attended person can not be inpatient... only symptomatic, so skip the remaining branches (only count symptomatic days)
+        rt == 2 && continue ## a non-medical attended person can not be inpatient/outpatient; only symptomatic, so skip the rest of the code
             
-        # first efficacy endpoint, against outpatient/inpatient (i.e. MA) 
+        # first efficacy endpoint, against outpatient/inpatient (i.e. MA)
         # i.e., essentially turns a MA infant to a N-MA infant 
-        # if coin toss is true a MA patient essentially becomes a N-MA and we dont need to run the remaining if statements
-        rand() < x.eff_outpatient[rm] && continue # get the outpatient efficacy  at the time of infection, don't need the 1 - efficacy in this case
+        # if coin toss is true a MA patient essentially becomes a N-MA and we dont need to run the remaining if statements (we've already recorded symptomatic days)
+        rand(rng2) < x.eff_outpatient[rm] && continue # get the outpatient efficacy at the time of infection (from vaccine functions), don't need the 1 - efficacy in this case
          
         # at this point the infant is MA and will either be an outpatient or inpatient 
-        # probability of inpatient (and ICU) depends on month of infection (i.e, how many months after birth) AND preterm/gestational period
-        # this probability is adjusted by vaccine efficacy
+        # probability of inpatient (and further ward/ICU) depends on month of infection (i.e, how many months after birth) AND preterm/gestational period
+        # this probability is further adjusted by vaccine efficacy
         distr = x.preterm ? prob_inpatient_preterm[x.gestation] : prob_inpatient_fullterm
-        diff = (rm - x.monthborn) + 1 # the prob of inpatient depends on when infection happens after birth
+        diff = (rm - x.monthborn) + 1 
         prob_inpatient = distr[diff] * (1 - x.eff_hosp[rm])    
        
-        # probability of ICU is also adjusted by efficacy.
+        # probability of ICU also depends on preterm (but not gestation) and is further adjusted by efficacy.
         prob_icu = x.preterm ? 0.154 : 0.13
         prob_icu = prob_icu * (1 - x.eff_icu[rm])
        
-        # probability of recovery/death -- not affected by vaccine (already accounted for in other efficacy end points)
+        # probability of recovery/death depends on preterm (but not gestation) but not affected by vaccine 
         _prob_recoveries = [0.081, 0.033, 0.033]
         prob_recovery = x.preterm ? _prob_recoveries[x.gestation] : 0.005
 
-        # outpatient, ward, and icu
-        if rand() < prob_inpatient             
+        # outcome flows for inpatient/outpatient, icu/ward, wheezing, and recovery/death
+        if rand(rng2) < prob_inpatient             
             push!(flow, "inpatient")
-            if rand() < prob_icu 
+            if rand(rng2) < prob_icu 
                 push!(flow, "icu")
                 sampled_days["icu"] += x.gestation in (1, 2) ? rand(Gamma(20.22, 0.47)) : rand(Gamma(12.38, 0.42))
             else # pediatric ward
                 push!(flow, "pediatric ward")
                 sampled_days["pediatricward"] += x.gestation in (1, 2) ? rand(Gamma(12.71, 0.48)) : rand(Gamma(6.08, 0.64)) 
             end
-            if rand() < (1 - prob_recovery)  # after ICU or PedWard, check if recovered or death 
+            if rand(rng2) < (1 - prob_recovery)  # after ICU or PedWard, check if recovered or death 
                 push!(flow, "recovery")
-                if rand() < prob_wheezing # wheezing episode
+                if rand(rng2) < prob_wheezing # wheezing episode
                     push!(flow, "wheezing")
                     sampled_days["wheezing"] +=  rand(Uniform(5.2, 9.8))
                 end
@@ -673,7 +672,7 @@ function outcome_flow(x)
             end
         else # is either office ot ED
             push!(flow, "outpatient")
-            if rand() < prob_emergencydept
+            if rand(rng2) < prob_emergencydept
                 push!(flow, "ED")
                 sampled_days["emergencydept"] += 1
             else 
@@ -682,44 +681,46 @@ function outcome_flow(x)
             end
         end
     end
-    # add the remaining days  
+
+    # add the remaining days (prior, after infection) -- might use this in calculations of QALYs
+    sampled_days["prior_to_infection"] += (x.rsvmonth[1] - x.monthborn) * 30 
     sampled_days["after_infection"] += 365 - sum(values(sampled_days))
 
-    # print statistics
-    # println("")
-    # println(join(flow, " => "))
-    # println("")
-    # println("total days: $(sum(values(sampled_days)))")
-
-    return sampled_days, flow # return the number of days in each outcome state
+    return sampled_days, flow
 end
 
 function outcome_analysis()
+    # this function performs outcome analysis on all infants with RSV episodes 
+
     # find all newborns that had atleast one symptomatic episode in their first year of life
     newborns = findall(x -> x.newborn == true && x.rsvpositive > 0 && (x.rsvmonth[1] - x.monthborn) <= 11, humans)
-    _nbpos = findall(x -> x.newborn == true && x.rsvpositive > 0, humans) #sanity check
+    
+    # sanity check: there are some infants that will have an infection outside their first year of life... lets print out the difference
+    _nbpos = findall(x -> x.newborn == true && x.rsvpositive > 0, humans) 
     @info "\ntotal rsv positive newborns: $(length(_nbpos)) \nthose with first infection in first year:$(length(newborns))"
 
-    # create QALY distributions (disutility)
+    # create (disutility) distributions for QALY calculations
     qaly_prior_to_infection = Beta(19.2, 364.6)
     qaly_symptomatic = Beta(53.6, 281.4)
     qaly_pediatricward = Beta(109.7, 157.9)
     qaly_icu = Beta(159.4, 106.2)
     qaly_wheezing = Beta(14.1, 338.4)
 
-    data = []
-    qalyslost = Float64[]
-    qalyslost_death = Float64[] # separate the qalys lost (and cost) due to death... since they are not counted in the government perspective
-    totalcosts = Float64[] 
-    totalcosts_death = Float64[]
+    # initialize empty vectors to save all outcome data
+    # data = [] -- use if saving all the individual level outcome data -- not really neccessary  
+    qalyslost = zeros(Float64, length(newborns))
+    qalyslost_death = zeros(Float64, length(newborns)) # separate the qalys lost (and cost) due to death... since they are not counted in the government perspective
+    totalcosts = zeros(Float64, length(newborns)) 
+    totalcosts_death = zeros(Float64, length(newborns))
     total_inpatients = 0 
     total_outpatients = 0
-
+    total_non_ma = 0 
 
     for (i, h) in enumerate(newborns) 
         x = humans[h]   
         sampled_days, flow = outcome_flow(x)  # simulate outcomes for the RSV infant
         @info "flow chart for id $i: $(join(flow, " => "))" 
+        
         # A dict to hold qaly values as they are being calculated
         qalys = Dict(
             "q_prior_to_infection" => 0., 
@@ -730,15 +731,15 @@ function outcome_analysis()
             "q_wheezing" => 0., 
             "q_death" => 0.
         )
-        sm = rand(qaly_prior_to_infection) # use this distribution for both prior and after infection qalys
-        #qalys["q_prior_to_infection"] = sampled_days["prior_to_infection"] / 365 * sm 
-        #qalys["q_after_infection"] = sampled_days["after_infection"] / 365 * sm
+        #qalys["q_prior_to_infection"] = sampled_days["prior_to_infection"] / 365 * rand(qaly_prior_to_infection) ## USE THE SAME RAND FOR BOTH PRIOR AND AFTER
+        #qalys["q_after_infection"] = sampled_days["after_infection"] / 365 * rand(qaly_prior_to_infection) 
         qalys["q_symptomatic"] = sampled_days["symptomatic"] / 365 * rand(qaly_symptomatic)
         qalys["q_pediatricward"] = sampled_days["pediatricward"] / 365 * rand(qaly_pediatricward)
         qalys["q_icu"] = sampled_days["icu"] / 365 * rand(qaly_icu)
         qalys["q_wheezing"] = sampled_days["wheezing"] / 365 * rand(qaly_wheezing)
         qalys["q_death"] = sampled_days["death"] * 45.3
         
+        # A dict to hold costs as they are being calculated
         costs = Dict(
             "cost_in_icu" => 0., 
             "cost_in_ward" => 0., 
@@ -779,6 +780,7 @@ function outcome_analysis()
             end
             cost_followup
         end
+
         costs["cost_wheezing"] = begin 
             cw = 0 
             if sampled_days["wheezing"] > 0
@@ -789,41 +791,43 @@ function outcome_analysis()
         costs["cost_outpatient"] = (sampled_days["emergencydept"] * 342) + (sampled_days["office_consultation"] * 229) 
         costs["cost_death"] = sampled_days["death"] * 2292572
         
+        # calculate number of inpatient/outpatient/ non-MA episodes
         total_inpatients += (sampled_days["icu"] + sampled_days["pediatricward"]) > 0  
         total_outpatients += (sampled_days["emergencydept"] + sampled_days["office_consultation"]) > 0  
+        total_non_ma += (sampled_days["emergencydept"] + sampled_days["office_consultation"] + sampled_days["icu"] + sampled_days["pediatricward"]) == 0
 
-        # save individual level + totals data
-        push!(qalyslost, qalys["q_symptomatic"] + qalys["q_pediatricward"], qalys["q_icu"], qalys["q_wheezing"])
-        push!(qalyslost_death, qalys["q_death"])
-        push!(totalcosts, costs["cost_in_icu"] + costs["cost_in_ward"] + costs["cost_hosp_followup"] + costs["cost_wheezing"] + costs["cost_outpatient"])
-        push!(totalcosts_death, costs["cost_death"])
-        qaly_tup = NamedTuple(Symbol(k) => v for (k,v) in qalys)
-        cost_tup = NamedTuple(Symbol(k) => v for (k,v) in costs)
-        push!(data, (;x.idx, x.monthborn, x.preterm, x.vac_lama, x.vac_mat, infection_tup(x)..., qaly_tup..., cost_tup...))
-        #display(qalys)
+        # calculate total QALYs and Costs
+        qalyslost[i] = qalys["q_symptomatic"] + qalys["q_pediatricward"] + qalys["q_icu"] + qalys["q_wheezing"]
+        qalyslost_death[i] = qalys["q_death"]
+        totalcosts[i] = costs["cost_in_icu"] + costs["cost_in_ward"] + costs["cost_hosp_followup"] + costs["cost_wheezing"] + costs["cost_outpatient"]
+        totalcosts_death[i] = costs["cost_death"]
+        
+        # save all of the individual level information as a named tuple -- will be turned into a dataframe to store as a CSV 
+        # qaly_tup = NamedTuple(Symbol(k) => v for (k,v) in qalys)
+        # cost_tup = NamedTuple(Symbol(k) => v for (k,v) in costs)
+        # push!(data, (;x.idx, x.monthborn, x.preterm, x.vac_lama, x.vac_mat, infection_tup(x)..., qaly_tup..., cost_tup...))
     end
-   
     # save simulation specific data as a csv file for debug purposes later
     #df = DataFrame(data) 
     #CSV.write("./output/sim_$(randstring(5)).csv", df)
     #return qalyslost
-    return length(newborns), sum(qalyslost), sum(qalyslost_death), sum(totalcosts), sum(totalcosts_death), total_inpatients, total_outpatients
+
+    return length(newborns), sum(qalyslost), sum(qalyslost_death), sum(totalcosts), sum(totalcosts_death), total_inpatients, total_outpatients, total_non_ma
 end
 
 
 function infection_tup(x) 
-    rsvmonth1 = x.rsvmonth[1]
-    rsvage1 = x.rsvage[1]
-    rsvtype1 = x.rsvtype[1]
+    # this function returns a named n-tuple of rsvmonth and rsvtype for both episodes (-99 if there is no second episode)
+    # the argument expects atleast a single infection, otherwise will crash. 
 
+    rsvmonth1 = x.rsvmonth[1]
+    rsvtype1 = x.rsvtype[1]
     rsvmonth2 = -99
-    rsvage2 = -99
     rsvtype2 = -99
     if x.rsvpositive == 2 # if 2 symptomatic episodes, check whether it happens within 12 months 
         diff = x.rsvmonth[2] - x.monthborn
         if diff <= 11 
             rsvmonth2 = x.rsvmonth[2] 
-            rsvage2 = x.rsvage[2]
             rsvtype2 =  x.rsvtype[2] 
         end
     end
