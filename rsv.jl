@@ -547,7 +547,7 @@ function lama_vaccine(coverage = 0.90, strat="strat3")
 
         # in this strategy the cost is of all newborns regardless of who is administered the vaccine
         _nc = findall(x -> x.newborn == true, humans)
-        total_cost = length(_nc) * 150 # 550
+        total_cost = length(_nc) * 550
     else 
         error("wrong strategy for lama vaccination")
     end
@@ -620,20 +620,29 @@ function outcome_flow(x)
 
     for ic in 1:infcnt_max  
         push!(flow, "INF$ic")
-        days_symptomatic = rand(days_symptomatic_distr)
-        sampled_days["symptomatic"] += days_symptomatic
         push!(flow, "Symptomatic")
+
 
         rt = x.rsvtype[ic] 
         rm = x.rsvmonth[ic]
-
         !(rt in (1, 2)) && error("RSV type incorrect, required 1 or 2... given: $rt") # quick error check
-        rt == 2 && continue ## a non-medical attended person can not be inpatient/outpatient; only symptomatic, so skip the rest of the code
-            
+
         # first efficacy endpoint, against outpatient/inpatient (i.e. MA)
-        # i.e., essentially turns a MA infant to a N-MA infant 
-        # if coin toss is true a MA patient essentially becomes a N-MA and we dont need to run the remaining if statements (we've already recorded symptomatic days)
-        rand(rng2) < x.eff_outpatient[rm] && continue # get the outpatient efficacy at the time of infection (from vaccine functions), don't need the 1 - efficacy in this case
+        # i.e., essentially turns a MA infant to a N-MA infant (the loop will not run) 
+        outpatient_ct = rand(rng2) < x.eff_outpatient[rm] 
+
+        # for every single rsv episode, sample the number of symptomatic days 
+        # reduce the number of symptomatic days by 60% if person is NON-MA (or becomes NON MA due to vaccine)
+        days_symptomatic = rand(days_symptomatic_distr)
+        if rt == 2 || outpatient_ct
+            days_symptomatic = days_symptomatic * (1 - 0.60)
+        end
+        sampled_days["symptomatic"] += days_symptomatic
+     
+        # for non-ma episodes (either by sampled or by vaccine), ignore the remaining code
+        if rt == 2 || outpatient_ct
+            continue
+        end
          
         # at this point the infant is MA and will either be an outpatient or inpatient 
         # probability of inpatient (and further ward/ICU) depends on month of infection (i.e, how many months after birth) AND preterm/gestational period
