@@ -53,10 +53,10 @@ const qaly_wheezing = Beta(14.1, 338.4)
 export humans
 
 
-function debug()
+function debug(sc=:s0)
     logger = NullLogger()
     global_logger(logger)
-    simulate_id = 60 ## THIS WILL SIMULATE WITH THIS SEED
+    simulate_id = 66 ## THIS WILL SIMULATE WITH THIS SEED
     # this means the init/incidence numbers should always be the same
     # use this to debug outcome analysis/ and vaccine
     Random.seed!(53 * simulate_id) # T
@@ -66,7 +66,7 @@ function debug()
     println("total newborns: $nb")
     tf = incidence()
     println("total episodes sampled: $tf")
-    vc = vaccine_scenarios(:s2) # s0 no vaccine
+    vc = vaccine_scenarios(sc) # s0 no vaccine
     println("vaccine cost: $vc")
     nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis()
 end
@@ -674,7 +674,7 @@ function outcome_flow(x)
 
     for ic in 1:infcnt_max  
         push!(flow, "INF$ic")
-        push!(flow, "Symptomatic")
+        push!(flow, "symptomatic")
 
         rn_outpatient = rand(rng2)
         rn_inpatient = rand(rng2)
@@ -701,6 +701,7 @@ function outcome_flow(x)
      
         # for non-ma episodes (either by sampled or by vaccine), ignore the remaining code
         if rt == 2 || outpatient_ct
+            push!(flow, "nonma")
             continue
         end
          
@@ -848,6 +849,7 @@ function outcome_analysis()
     total_outpatients = 0
     total_non_ma = 0 
 
+    
     for (i, h) in enumerate(newborns) 
         x = humans[h]   
         sampled_days, flow = outcome_flow(x)  # simulate outcomes for the RSV infant
@@ -862,10 +864,12 @@ function outcome_analysis()
         totalcosts_death += cl
 
         # calculate number of inpatient/outpatient/ non-MA episodes
-        total_inpatients += (sampled_days["icu"] + sampled_days["pediatricward"]) > 0  
-        total_outpatients += (sampled_days["emergencydept"] + sampled_days["office_consultation"]) > 0  
-        total_non_ma += (sampled_days["emergencydept"] + sampled_days["office_consultation"] + sampled_days["icu"] + sampled_days["pediatricward"]) == 0
-
+        
+        
+        total_inpatients += length(findall(x -> x == "inpatient", flow))
+        total_outpatients += length(findall(x -> x == "outpatient", flow))
+        total_non_ma += length(findall(x -> x == "nonma", flow))
+        
         # save all of the individual level information as a named tuple -- will be turned into a dataframe to store as a CSV 
         # qaly_tup = NamedTuple(Symbol(k) => v for (k,v) in qalys)
         # cost_tup = NamedTuple(Symbol(k) => v for (k,v) in costs)
