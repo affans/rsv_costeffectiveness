@@ -43,15 +43,28 @@ const p = ModelParameters()  ## setup default parameters
 const ON_POP = 13448500 # 13448495 from ontario database, but their numbers don't add up
 pc(x) = Int(round(x / ON_POP * 100000)) # 13_448_495: max population in ontario 
 
+# create (disutility) distributions for QALY calculations
+const qaly_prior_to_infection = Beta(19.2, 364.6)
+const qaly_symptomatic = Beta(53.6, 281.4)
+const qaly_pediatricward = Beta(109.7, 157.9)
+const qaly_icu = Beta(159.4, 106.2)
+const qaly_wheezing = Beta(14.1, 338.4)
+
 export humans
 
 
-function main()
+function debug()
+    logger = NullLogger()
+    global_logger(logger)
+    simulate_id = 21 ## THIS WILL SIMULATE WITH THIS SEED
+    # this means the init/incidence numbers should always be the same
+    # use this to debug outcome analysis/ and vaccine
+    Random.seed!(53 * simulate_id) # T
     reset_params()  # reset the parameters for the simulation scenario    
     nb = initialize() 
     tf = incidence()
-    #vc = vaccine_scenarios(:s0) # s0 no vaccine
-    #nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis()
+    vc = vaccine_scenarios(:s4) # s0 no vaccine
+    nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis()
 end
 
 function simulations() 
@@ -72,6 +85,7 @@ function simulations()
     @showprogress for sc in scenarios 
         sc_data = zeros(Float64, num_of_sims, 9)
         for i = 1:num_of_sims
+            @info "\nsim: $i sc: $sc"
             Random.seed!(53 * i) # for each simulation, set the seed so that the same number of newborns/preterms/incidence are sampled! 
             nb = initialize() 
             tf = incidence()
@@ -629,6 +643,12 @@ function outcome_flow(x)
         push!(flow, "INF$ic")
         push!(flow, "Symptomatic")
 
+        rn_outpatient = rand(rng2)
+        rn_inpatient = rand(rng2)
+        rn_icu = rand(rng2)
+        rn_recovery = rand(rng2)
+        rn_wheezing = rand(rng2)
+        rn_emergency = rand(rng2)
 
         rt = x.rsvtype[ic] 
         rm = x.rsvmonth[ic]
@@ -636,7 +656,7 @@ function outcome_flow(x)
 
         # first efficacy endpoint, against outpatient/inpatient (i.e. MA)
         # i.e., essentially turns a MA infant to a N-MA infant (the loop will not run) 
-        outpatient_ct = rand(rng2) < x.eff_outpatient[rm] 
+        outpatient_ct = rn_outpatient < x.eff_outpatient[rm] 
 
         # for every single rsv episode, sample the number of symptomatic days 
         # reduce the number of symptomatic days by 60% if person is NON-MA (or becomes NON MA due to vaccine)
@@ -665,20 +685,20 @@ function outcome_flow(x)
         # probability of recovery/death depends on preterm (but not gestation) but not affected by vaccine 
         _prob_recoveries = [0.081, 0.033, 0.033]
         prob_recovery = x.preterm ? _prob_recoveries[x.gestation] : 0.005
-
+     
         # outcome flows for inpatient/outpatient, icu/ward, wheezing, and recovery/death
-        if rand(rng2) < prob_inpatient             
+        if rn_inpatient < prob_inpatient     
             push!(flow, "inpatient")
-            if rand(rng2) < prob_icu 
+            if rn_icu < prob_icu 
                 push!(flow, "icu")
                 sampled_days["icu"] += x.gestation in (1, 2) ? rand(Gamma(20.22, 0.47)) : rand(Gamma(12.38, 0.42))
             else # pediatric ward
                 push!(flow, "pediatric ward")
                 sampled_days["pediatricward"] += x.gestation in (1, 2) ? rand(Gamma(12.71, 0.48)) : rand(Gamma(6.08, 0.64)) 
             end
-            if rand(rng2) < (1 - prob_recovery)  # after ICU or PedWard, check if recovered or death 
+            if rn_recovery < (1 - prob_recovery)  # after ICU or PedWard, check if recovered or death 
                 push!(flow, "recovery")
-                if rand(rng2) < prob_wheezing # wheezing episode
+                if rn_wheezing < prob_wheezing # wheezing episode
                     push!(flow, "wheezing")
                     sampled_days["wheezing"] +=  rand(Uniform(5.2, 9.8))
                 end
@@ -688,7 +708,7 @@ function outcome_flow(x)
             end
         else # is either office ot ED
             push!(flow, "outpatient")
-            if rand(rng2) < prob_emergencydept
+            if rn_emergency < prob_emergencydept
                 push!(flow, "ED")
                 sampled_days["emergencydept"] += 1
             else 
@@ -705,22 +725,85 @@ function outcome_flow(x)
     return sampled_days, flow
 end
 
+function calculate_qaly(x, sampled_days) 
+    # calculate the QALYs due to type of RSV episode
+    q_symp = sampled_days["symptomatic"] / 365 * (1 - rand(qaly_symptomatic))
+    q_pediatricward = sampled_days["pediatricward"] / 365 * (1 - rand(qaly_pediatricward))
+    q_icu = sampled_days["icu"] / 365 * (1 - rand(qaly_icu))
+    q_wheezing = sampled_days["wheezing"] / 365 * (1 - rand(qaly_wheezing))
+    
+    # calculate the non-RSV QALY 
+    non_rsv_days = (365 - sampled_days["symptomatic"] - sampled_days["pediatricward"] - sampled_days["icu"]  - sampled_days["wheezing"]) / 365
+    non_rsv_qaly = non_rsv_days * (1 - rand(qaly_prior_to_infection))
+    
+    # calculate the total QALY for the infant (non rsv + rsv)
+    totalqalys = non_rsv_qaly + q_symp + q_pediatricward + q_icu + q_wheezing
+
+    q_loss_due_to_death = sampled_days["death"] * 45.3
+    return totalqalys, q_loss_due_to_death
+end
+
+function calculate_costs(x, sampled_days) 
+   # A dict to hold costs as they are being calculated
+   costs = Dict(
+    "cost_in_icu" => 0., 
+    "cost_in_ward" => 0., 
+    "cost_hosp_followup" => 0., 
+    "cost_wheezing" => 0., 
+    "cost_outpatient" => 0.
+    )
+    costs["cost_in_icu"] = 3638 * sampled_days["icu"] # 10, 2 symptomatics
+    costs["cost_in_ward"] = 1491 * sampled_days["pediatricward"]
+    costs["cost_hosp_followup"] = begin 
+        cost_followup = 0 
+        if (sampled_days["icu"] + sampled_days["pediatricward"]) > 0 
+            diff1 = x.rsvmonth[1] - x.monthborn
+            if diff1 == 0 
+                cost_followup += 1791 
+            elseif diff1 in (1, 2)  
+                cost_followup += 1261
+            elseif diff1 in (3, 4, 5) 
+                cost_followup += 423 
+            else 
+                cost_followup += 374
+            end
+            
+            if x.rsvpositive == 2 
+                diff2 = x.rsvmonth[2] - x.monthborn
+                if diff2 == 0 
+                    cost_followup += 1791 
+                elseif diff2 in (1, 2)  
+                    cost_followup += 1261
+                elseif diff2 in (3, 4, 5) 
+                    cost_followup += 423 
+                else 
+                    cost_followup += 374
+                end
+            end
+        end
+        cost_followup
+    end
+    costs["cost_wheezing"] = begin 
+        cw = 0 
+        if sampled_days["wheezing"] > 0
+            cw = sampled_days["wheezing"] > 10 ? (229 * 2) : 229 # a little trick to see if there were two wheezing episodes (since max of one episode is 9.8)
+        end
+        cw
+    end
+    costs["cost_outpatient"] = (sampled_days["emergencydept"] * 342) + (sampled_days["office_consultation"] * 229) 
+    cost_due_to_death = sampled_days["death"] * 2292572
+    return sum(values(costs)), cost_due_to_death
+end
+
 function outcome_analysis()
     # this function performs outcome analysis on all infants with RSV episodes 
-
+    println("rand: $(rand())")
     # find all newborns that had atleast one symptomatic episode in their first year of life
     newborns = findall(x -> x.newborn == true && x.rsvpositive > 0 && (x.rsvmonth[1] - x.monthborn) <= 11, humans)
-    
+
     # sanity check: there are some infants that will have an infection outside their first year of life... lets print out the difference
     _nbpos = findall(x -> x.newborn == true && x.rsvpositive > 0, humans) 
     @info "\ntotal rsv positive newborns: $(length(_nbpos)) \nthose with first infection in first year:$(length(newborns))"
-
-    # create (disutility) distributions for QALY calculations
-    qaly_prior_to_infection = Beta(19.2, 364.6)
-    qaly_symptomatic = Beta(53.6, 281.4)
-    qaly_pediatricward = Beta(109.7, 157.9)
-    qaly_icu = Beta(159.4, 106.2)
-    qaly_wheezing = Beta(14.1, 338.4)
 
     # initialize empty vectors to save all outcome data
     # data = [] -- use if saving all the individual level outcome data -- not really neccessary  
@@ -737,89 +820,19 @@ function outcome_analysis()
         sampled_days, flow = outcome_flow(x)  # simulate outcomes for the RSV infant
         @info "flow chart for id $i: $(join(flow, " => "))" 
         
-        # A dict to hold qaly values as they are being calculated
-        qalys = Dict(
-            "q_prior_to_infection" => 0., 
-            "q_after_infection" => 0., 
-            "q_symptomatic" => 0., 
-            "q_pediatricward" => 0., 
-            "q_icu" => 0., 
-            "q_wheezing" => 0., 
-            "q_death" => 0.
-        )
-        #qalys["q_prior_to_infection"] = sampled_days["prior_to_infection"] / 365 * rand(qaly_prior_to_infection) ## USE THE SAME RAND FOR BOTH PRIOR AND AFTER
-        #qalys["q_after_infection"] = sampled_days["after_infection"] / 365 * rand(qaly_prior_to_infection) 
-        qalys["q_symptomatic"] = sampled_days["symptomatic"] / 365 * (1 - rand(qaly_symptomatic))
-        qalys["q_pediatricward"] = sampled_days["pediatricward"] / 365 * (1 - rand(qaly_pediatricward))
-        qalys["q_icu"] = sampled_days["icu"] / 365 * (1 - rand(qaly_icu))
-        qalys["q_wheezing"] = sampled_days["wheezing"] / 365 * (1 - rand(qaly_wheezing))
-        qalys["q_death"] = 0 # sampled_days["death"] * 45.3
+        # calculate qalys and costs
+        tq, ql = calculate_qaly(x, sampled_days) 
+        tc, cl = calculate_costs(x, sampled_days)
+        totalqalys += tq
+        totalcosts += tc
+        qalyslost_death += ql 
+        totalcosts_death += cl
 
-        tq = (365 - sampled_days["symptomatic"] - sampled_days["pediatricward"] - sampled_days["icu"]  - sampled_days["wheezing"])/365 * (1 - rand(qaly_prior_to_infection)) + sum(values(qalys)) 
-        totalqalys += tq 
-
-        # --------- COST ANALYSIS
-        
-        # A dict to hold costs as they are being calculated
-        costs = Dict(
-            "cost_in_icu" => 0., 
-            "cost_in_ward" => 0., 
-            "cost_hosp_followup" => 0., 
-            "cost_wheezing" => 0., 
-            "cost_outpatient" => 0., 
-            "cost_death" => 0.
-        )
-
-        costs["cost_in_icu"] = 3638 * sampled_days["icu"] # 10, 2 symptomatics
-        costs["cost_in_ward"] = 1491 * sampled_days["pediatricward"]
-        costs["cost_hosp_followup"] = begin 
-            cost_followup = 0 
-            if (sampled_days["icu"] + sampled_days["pediatricward"]) > 0 
-                diff1 = x.rsvmonth[1] - x.monthborn
-                if diff1 == 0 
-                    cost_followup += 1791 
-                elseif diff1 in (1, 2)  
-                    cost_followup += 1261
-                elseif diff1 in (3, 4, 5) 
-                    cost_followup += 423 
-                else 
-                    cost_followup += 374
-                end
-                
-                if x.rsvpositive == 2 
-                    diff2 = x.rsvmonth[2] - x.monthborn
-                    if diff2 == 0 
-                        cost_followup += 1791 
-                    elseif diff2 in (1, 2)  
-                        cost_followup += 1261
-                    elseif diff2 in (3, 4, 5) 
-                        cost_followup += 423 
-                    else 
-                        cost_followup += 374
-                    end
-                end
-            end
-            cost_followup
-        end
-
-        costs["cost_wheezing"] = begin 
-            cw = 0 
-            if sampled_days["wheezing"] > 0
-                cw = sampled_days["wheezing"] > 10 ? (229 * 2) : 229 # a little trick to see if there were two wheezing episodes (since max of one episode is 9.8)
-            end
-            cw
-        end
-        costs["cost_outpatient"] = (sampled_days["emergencydept"] * 342) + (sampled_days["office_consultation"] * 229) 
-        costs["cost_death"] = sampled_days["death"] * 2292572
-        
         # calculate number of inpatient/outpatient/ non-MA episodes
         total_inpatients += (sampled_days["icu"] + sampled_days["pediatricward"]) > 0  
         total_outpatients += (sampled_days["emergencydept"] + sampled_days["office_consultation"]) > 0  
         total_non_ma += (sampled_days["emergencydept"] + sampled_days["office_consultation"] + sampled_days["icu"] + sampled_days["pediatricward"]) == 0
 
-        # calculate total QALYs and Costs
-        totalcosts += costs["cost_in_icu"] + costs["cost_in_ward"] + costs["cost_hosp_followup"] + costs["cost_wheezing"] + costs["cost_outpatient"]
-    
         # save all of the individual level information as a named tuple -- will be turned into a dataframe to store as a CSV 
         # qaly_tup = NamedTuple(Symbol(k) => v for (k,v) in qalys)
         # cost_tup = NamedTuple(Symbol(k) => v for (k,v) in costs)
