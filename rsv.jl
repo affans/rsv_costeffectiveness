@@ -77,7 +77,7 @@ function simulations()
     global_logger(logger)
    
     num_of_sims = 10
-    scenarios = [:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8]
+    scenarios = [:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9]
     all_data = []
 
     Random.seed!(rng, abs(rand(Int16)))  # set the seed randomly for the vaccine functions
@@ -99,7 +99,7 @@ function simulations()
     close(io)
    
     # generate colnames for Seyed's preferred format
-    colnames = ["_newborns", "_vaccinecost", "_rsvcost", "_deathcost", "_qalylost", "qalylost_death", "_inpatients", "_outpatients", "_non_ma"]
+    colnames = ["_newborns", "_vaccinecost", "_rsvcost", "_deathcost", "_totalqalys", "qalylost_death", "_inpatients", "_outpatients", "_non_ma"]
     scnames = string.(scenarios)
     dfnames = vcat([sc .* colnames for sc in scnames]...)
     
@@ -120,6 +120,7 @@ function vaccine_scenarios(scenario)
         :s6 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat1"); _m + _l; end
         :s7 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat2"); _m + _l; end
         :s8 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat3"); _m + _l; end
+        :s9 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat4"); _m + _l; end
     end 
     return vc
 end
