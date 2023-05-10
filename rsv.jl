@@ -56,14 +56,18 @@ export humans
 function debug()
     logger = NullLogger()
     global_logger(logger)
-    simulate_id = 21 ## THIS WILL SIMULATE WITH THIS SEED
+    simulate_id = 60 ## THIS WILL SIMULATE WITH THIS SEED
     # this means the init/incidence numbers should always be the same
     # use this to debug outcome analysis/ and vaccine
     Random.seed!(53 * simulate_id) # T
+    Random.seed!(rng, 5)  # set the seed randomly for the vaccine functions
     reset_params()  # reset the parameters for the simulation scenario    
     nb = initialize() 
+    println("total newborns: $nb")
     tf = incidence()
-    vc = vaccine_scenarios(:s4) # s0 no vaccine
+    println("total episodes sampled: $tf")
+    vc = vaccine_scenarios(:s2) # s0 no vaccine
+    println("vaccine cost: $vc")
     nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis()
 end
 
@@ -112,15 +116,15 @@ export main
 function vaccine_scenarios(scenario) 
     vc = @match scenario begin 
         :s0 => 0 
-        :s1 => lama_vaccine(0.9, "strat1")
-        :s2 => lama_vaccine(0.9, "strat2")
-        :s3 => lama_vaccine(0.9, "strat3")
-        :s4 => lama_vaccine(0.9, "strat4")
+        :s1 => lama_vaccine("s1")
+        :s2 => lama_vaccine("s2")
+        :s3 => lama_vaccine("s3")
+        :s4 => lama_vaccine("s4")
         :s5 => maternal_vaccine()
-        :s6 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat1"); _m + _l; end
-        :s7 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat2"); _m + _l; end
-        :s8 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat3"); _m + _l; end
-        :s9 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat4"); _m + _l; end
+        :s6 => begin _m = maternal_vaccine(); _l = lama_vaccine("s1"); _m + _l; end
+        :s7 => begin _m = maternal_vaccine(); _l = lama_vaccine("s2"); _m + _l; end
+        :s8 => begin _m = maternal_vaccine(); _l = lama_vaccine("s3"); _m + _l; end
+        :s9 => begin _m = maternal_vaccine(); _l = lama_vaccine("s4"); _m + _l; end
     end 
     return vc
 end
@@ -547,31 +551,59 @@ function maternal_vaccine(coverage=0.60)
     return total_cost
 end
 
-function lama_vaccine(coverage = 0.90, strat="strat3") 
-    # (i) vaccination of preterm infants under 32 wGA with 90% coverage (S1); 
-    # (ii) vaccination of all preterm infants with 90% coverage (S2) in addition to S1; 
-    # (iii) vaccination of all infants with 90% coverage
-    if strat == "strat1" 
-        newborns = findall(x -> x.newborn == true && x.gestation in (1, 2) && rand(rng) < coverage, humans) # 1 = <29, 2 = 29-32 weeks, 3 = 33-36 weeks
-        total_cost = length(newborns) * 1000 
-    elseif strat == "strat2"
-        newborns = findall(x -> x.newborn == true && x.preterm == true && rand(rng) < coverage, humans) ## all preterm, regardless of gestation
-        total_cost = length(newborns) * 1000
-    elseif strat == "strat4" 
-        _newborns_preterm = findall(x -> x.newborn == true && x.preterm == true && rand(rng) < 0.90, humans)
-        _newborns_fullterm = findall(x -> x.newborn == true && x.preterm == false && rand(rng) < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
-        newborns = [_newborns_preterm..., _newborns_fullterm...]
 
-        # in this strategy the cost is of all newborns regardless of who is administered the vaccine
-        _nc = findall(x -> x.newborn == true, humans)
-        total_cost = length(_nc) * 550
-    elseif strat == "strat3"
-        _newborns_preterm = findall(x -> x.newborn == true && x.preterm == true && rand(rng) < 0.90, humans)
-        _newborns_fullterm = findall(x -> x.newborn == true && x.preterm == false && x.monthborn in 7:12 && rand(rng) < 0.90, humans)
-        newborns = [_newborns_preterm..., _newborns_fullterm...]
-        total_cost = length(newborns) * 1000
-    else 
-        error("wrong strategy for lama vaccination")
+function lama_eligible(sc) 
+    # LAMA vaccine is incremental. 
+    # so LAMA 2 should include all the selected people from LAMA 1 
+    # LAMA 3 should add on top of LAMA 2, etc etc
+
+    # get the baseline LAMA 1
+    nb_s1 = Set(findall(x -> x.newborn == true && x.gestation in (1, 2), humans))
+    nb_s2 = Set(findall(x -> x.newborn == true && x.preterm == true, humans))
+    nb_s3 = Set(findall(x -> x.newborn == true && x.monthborn in 7:12, humans))
+    nb_s4 = Set(findall(x -> x.newborn == true, humans))
+    nb = [nb_s1, nb_s2, nb_s3, nb_s4]
+    
+    elig_s1 = setdiff(nb_s1, Set([])) # doesn't do anything
+    elig_s2 = setdiff(nb_s2, nb_s1)
+    elig_s3 = setdiff(nb_s3, nb_s2, nb_s1) # essentiall all infants in 7:12, but not preterms (since thats s2)
+    elig_s4 = setdiff(nb_s4, nb_s3, nb_s2, nb_s1) # essentiall all infants in 7:12, but not preterms (since thats s2)
+    
+    # convert to vectors for sampling
+    _vecs = collect.([elig_s1, elig_s2, elig_s3, elig_s4])
+    @info ("length vecs: $(length.(_vecs))")
+    
+    # calculate 90% coverage for each group, and then sample these counts 
+    # make sure that you are passing in the vaccine specific RNG and `replace=false` to sample without replacement
+    coverage = 0.90
+    covlengths = Int.(round.(coverage .* length.(_vecs))) # 90% of their total lengths... 
+    eligible_per_strategy = sample.(rng, _vecs, covlengths, replace=false)
+    
+    total_eligible = @match sc begin 
+        "s1" => [eligible_per_strategy[1]...]
+        "s2" => [eligible_per_strategy[1]..., eligible_per_strategy[2]...]
+        "s3" => [eligible_per_strategy[1]..., eligible_per_strategy[2]..., eligible_per_strategy[3]...]
+        "s4" => [eligible_per_strategy[1]..., eligible_per_strategy[2]..., eligible_per_strategy[3]..., eligible_per_strategy[4]...]
+        _ =>  error("wrong strategy for lama vaccination")
+    end
+    return total_eligible
+end
+
+function lama_vaccine(strategy) 
+    # (i) vaccination of preterm infants under 32 wGA with 90% coverage (S1); 
+    # (ii) vaccination of all preterm infants with 90% coverage  !!! in addition to (i); 
+    # (iii) vaccination of infants born in month 7:12 with 90% coverage  !!! in addition to (ii); 
+    # (iv)  vaccination of all infants !!! in addition to (iii); 
+
+    # get the IDs of newborns based on strategy 
+    # `lama_eligible` builds the list of newborns incrementally
+    newborns = lama_eligible(strategy)
+    total_costs = @match strategy begin 
+        "s1" => length(newborns) * 1000
+        "s2" => length(newborns) * 1000
+        "s3" => length(newborns) * 1000
+        "s4" => 1088 * 550 # ALL 1088 BABIES ARE VACCINATED -- IF CHANGING THE NUMBER OF BABIES, UPDATE THIS VALUE
+        _ =>  error("wrong strategy for lama vaccination")
     end
 
     # theoretical efficacies
@@ -592,8 +624,8 @@ function lama_vaccine(coverage = 0.90, strat="strat3")
         x.eff_icu[fm:em] .= eff_icu
         x.vac_lama = true # set flag to true to indicate newborn is vaccinated by lama
     end
-    @info "number of newborns for LAMA and cost" length(newborns), total_cost
-    return total_cost
+    @info "number of newborns for LAMA and cost" length(newborns), total_costs
+    return total_costs
 end
 
 function outcome_flow(x) 
@@ -798,7 +830,7 @@ end
 
 function outcome_analysis()
     # this function performs outcome analysis on all infants with RSV episodes 
-    println("rand: $(rand())")
+   
     # find all newborns that had atleast one symptomatic episode in their first year of life
     newborns = findall(x -> x.newborn == true && x.rsvpositive > 0 && (x.rsvmonth[1] - x.monthborn) <= 11, humans)
 
