@@ -45,12 +45,13 @@ pc(x) = Int(round(x / ON_POP * 100000)) # 13_448_495: max population in ontario
 
 export humans
 
+
 function main()
     reset_params()  # reset the parameters for the simulation scenario    
     nb = initialize() 
     tf = incidence()
-    vc = vaccine_scenarios(:s0) # s0 no vaccine
-    nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis()
+    #vc = vaccine_scenarios(:s0) # s0 no vaccine
+    #nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis()
 end
 
 function simulations() 
@@ -63,7 +64,7 @@ function simulations()
     global_logger(logger)
    
     num_of_sims = 10
-    scenarios = [:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7]
+    scenarios = [:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8]
     all_data = []
 
     Random.seed!(rng, abs(rand(Int16)))  # set the seed randomly for the vaccine functions
@@ -100,10 +101,11 @@ function vaccine_scenarios(scenario)
         :s1 => lama_vaccine(0.9, "strat1")
         :s2 => lama_vaccine(0.9, "strat2")
         :s3 => lama_vaccine(0.9, "strat3")
-        :s4 => maternal_vaccine()
-        :s5 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat1"); _m + _l; end
-        :s6 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat2"); _m + _l; end
-        :s7 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat3"); _m + _l; end
+        :s4 => lama_vaccine(0.9, "strat4")
+        :s5 => maternal_vaccine()
+        :s6 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat1"); _m + _l; end
+        :s7 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat2"); _m + _l; end
+        :s8 => begin _m = maternal_vaccine(); _l = lama_vaccine(0.9, "strat3"); _m + _l; end
     end 
     return vc
 end
@@ -540,7 +542,7 @@ function lama_vaccine(coverage = 0.90, strat="strat3")
     elseif strat == "strat2"
         newborns = findall(x -> x.newborn == true && x.preterm == true && rand(rng) < coverage, humans) ## all preterm, regardless of gestation
         total_cost = length(newborns) * 1000
-    elseif strat == "strat3" 
+    elseif strat == "strat4" 
         _newborns_preterm = findall(x -> x.newborn == true && x.preterm == true && rand(rng) < 0.90, humans)
         _newborns_fullterm = findall(x -> x.newborn == true && x.preterm == false && rand(rng) < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
         newborns = [_newborns_preterm..., _newborns_fullterm...]
@@ -548,6 +550,11 @@ function lama_vaccine(coverage = 0.90, strat="strat3")
         # in this strategy the cost is of all newborns regardless of who is administered the vaccine
         _nc = findall(x -> x.newborn == true, humans)
         total_cost = length(_nc) * 550
+    elseif strat == "strat3"
+        _newborns_preterm = findall(x -> x.newborn == true && x.preterm == true && rand(rng) < 0.90, humans)
+        _newborns_fullterm = findall(x -> x.newborn == true && x.preterm == false && x.monthborn in 7:12 && rand(rng) < 0.90, humans)
+        newborns = [_newborns_preterm..., _newborns_fullterm...]
+        total_cost = length(newborns) * 1000
     else 
         error("wrong strategy for lama vaccination")
     end
@@ -717,10 +724,10 @@ function outcome_analysis()
 
     # initialize empty vectors to save all outcome data
     # data = [] -- use if saving all the individual level outcome data -- not really neccessary  
-    qalyslost = zeros(Float64, length(newborns))
-    qalyslost_death = zeros(Float64, length(newborns)) # separate the qalys lost (and cost) due to death... since they are not counted in the government perspective
-    totalcosts = zeros(Float64, length(newborns)) 
-    totalcosts_death = zeros(Float64, length(newborns))
+    totalqalys = 0
+    qalyslost_death = 0 
+    totalcosts = 0
+    totalcosts_death = 0
     total_inpatients = 0 
     total_outpatients = 0
     total_non_ma = 0 
@@ -742,11 +749,16 @@ function outcome_analysis()
         )
         #qalys["q_prior_to_infection"] = sampled_days["prior_to_infection"] / 365 * rand(qaly_prior_to_infection) ## USE THE SAME RAND FOR BOTH PRIOR AND AFTER
         #qalys["q_after_infection"] = sampled_days["after_infection"] / 365 * rand(qaly_prior_to_infection) 
-        qalys["q_symptomatic"] = sampled_days["symptomatic"] / 365 * rand(qaly_symptomatic)
-        qalys["q_pediatricward"] = sampled_days["pediatricward"] / 365 * rand(qaly_pediatricward)
-        qalys["q_icu"] = sampled_days["icu"] / 365 * rand(qaly_icu)
-        qalys["q_wheezing"] = sampled_days["wheezing"] / 365 * rand(qaly_wheezing)
-        qalys["q_death"] = sampled_days["death"] * 45.3
+        qalys["q_symptomatic"] = sampled_days["symptomatic"] / 365 * (1 - rand(qaly_symptomatic))
+        qalys["q_pediatricward"] = sampled_days["pediatricward"] / 365 * (1 - rand(qaly_pediatricward))
+        qalys["q_icu"] = sampled_days["icu"] / 365 * (1 - rand(qaly_icu))
+        qalys["q_wheezing"] = sampled_days["wheezing"] / 365 * (1 - rand(qaly_wheezing))
+        qalys["q_death"] = 0 # sampled_days["death"] * 45.3
+
+        tq = (365 - sampled_days["symptomatic"] - sampled_days["pediatricward"] - sampled_days["icu"]  - sampled_days["wheezing"])/365 * (1 - rand(qaly_prior_to_infection)) + sum(values(qalys)) 
+        totalqalys += tq 
+
+        # --------- COST ANALYSIS
         
         # A dict to hold costs as they are being calculated
         costs = Dict(
@@ -806,11 +818,8 @@ function outcome_analysis()
         total_non_ma += (sampled_days["emergencydept"] + sampled_days["office_consultation"] + sampled_days["icu"] + sampled_days["pediatricward"]) == 0
 
         # calculate total QALYs and Costs
-        qalyslost[i] = qalys["q_symptomatic"] + qalys["q_pediatricward"] + qalys["q_icu"] + qalys["q_wheezing"]
-        qalyslost_death[i] = qalys["q_death"]
-        totalcosts[i] = costs["cost_in_icu"] + costs["cost_in_ward"] + costs["cost_hosp_followup"] + costs["cost_wheezing"] + costs["cost_outpatient"]
-        totalcosts_death[i] = costs["cost_death"]
-        
+        totalcosts += costs["cost_in_icu"] + costs["cost_in_ward"] + costs["cost_hosp_followup"] + costs["cost_wheezing"] + costs["cost_outpatient"]
+    
         # save all of the individual level information as a named tuple -- will be turned into a dataframe to store as a CSV 
         # qaly_tup = NamedTuple(Symbol(k) => v for (k,v) in qalys)
         # cost_tup = NamedTuple(Symbol(k) => v for (k,v) in costs)
@@ -821,7 +830,7 @@ function outcome_analysis()
     #CSV.write("./output/sim_$(randstring(5)).csv", df)
     #return qalyslost
 
-    return length(newborns), sum(qalyslost), sum(qalyslost_death), sum(totalcosts), sum(totalcosts_death), total_inpatients, total_outpatients, total_non_ma
+    return length(newborns), totalqalys, qalyslost_death, totalcosts, totalcosts_death, total_inpatients, total_outpatients, total_non_ma
 end
 
 
