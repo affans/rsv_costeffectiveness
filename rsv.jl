@@ -53,7 +53,7 @@ const qaly_wheezing = Beta(14.1, 338.4)
 export humans
 
 
-function debug(sc=:s0)
+function debug(sc="s0")
     logger = NullLogger()
     global_logger(logger)
     simulate_id = 74 ## THIS WILL SIMULATE WITH THIS SEED
@@ -67,7 +67,7 @@ function debug(sc=:s0)
     tf = incidence()
     println("total episodes sampled: $tf")
     vc = vaccine_scenarios(sc) # s0 no vaccine
-    println("vaccine cost: $vc")
+    println("vaccine cnts: $vc")
     nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis()
 end
 
@@ -81,22 +81,22 @@ function simulations()
     global_logger(logger)
    
     num_of_sims = 2
-    scenarios = [:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9]
+    scenarios = String.([:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9])
     all_data = []
 
     Random.seed!(rng, abs(rand(Int16)))  # set the seed randomly for the vaccine functions
 
-    @showprogress for sc in scenarios 
-        sc_data = zeros(Float64, num_of_sims, 9)
+    @showprogress 0.5 for sc in scenarios 
+        sc_data = zeros(Float64, num_of_sims, 10)
         for i = 1:num_of_sims
             @info "\nsim: $i sc: $sc"
             Random.seed!(53 * i) # for each simulation, set the seed so that the same number of newborns/preterms/incidence are sampled! 
             Random.seed!(rng, 5 * i)
             nb = initialize() 
             tf = incidence()
-            vc = vaccine_scenarios(sc) # this will use its own internal RNG so won't disturb the global RNG 
+            lc, mc = vaccine_scenarios(sc) # this will use its own internal RNG so won't disturb the global RNG 
             nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis() 
-            sc_data[i,  :] .= [nbs, vc, rc, dc, ql, qd, inpats, outpats, non_ma]
+            sc_data[i,  :] .= [nbs, lc, mc, rc, dc, ql, qd, inpats, outpats, non_ma]
         end
         push!(all_data, sc_data)
     end
@@ -104,7 +104,7 @@ function simulations()
     close(io)
    
     # generate colnames for Seyed's preferred format
-    colnames = ["_newborns", "_vaccinecost", "_rsvcost", "_deathcost", "_totalqalys", "qalylost_death", "_inpatients", "_outpatients", "_non_ma"]
+    colnames = ["_newborns", "_lama_cnt", "_mat_cnt", "_rsvcost", "_deathcost", "_totalqalys", "qalylost_death", "_inpatients", "_outpatients", "_non_ma"]
     scnames = string.(scenarios)
     dfnames = vcat([sc .* colnames for sc in scnames]...)
     
@@ -115,22 +115,28 @@ end
 export main
 
 function vaccine_scenarios(scenario) 
-    vc = @match scenario begin 
-        :s0 => 0 
-        :s1 => lama_vaccine("s1")
-        :s2 => lama_vaccine("s2")
-        :s3 => lama_vaccine("s3")
-        :s4 => lama_vaccine("s4")
-        :s5 => maternal_vaccine()
-        :s6 => begin _m = maternal_vaccine(); _l = lama_vaccine("s1"); _m + _l; end
-        :s7 => begin _m = maternal_vaccine(); _l = lama_vaccine("s2"); _m + _l; end
-        :s8 => begin _m = maternal_vaccine(); _l = lama_vaccine("s3"); _m + _l; end
-        :s9 => begin _m = maternal_vaccine(); _l = lama_vaccine("s4"); _m + _l; end
-    end 
-    return vc
+    # ignore the costs being returned from the function -- seyed will calculate in his script
+    lama_cnt = 0 
+    mat_cnt = 0 
+    if scenario in ("s1", "s2", "s3", "s4")
+        _, cnt = lama_vaccine(scenario) 
+        lama_cnt = cnt
+        mat_cnt = 0 
+    elseif scenario == "s5"
+        _, cnt = maternal_vaccine()
+        lama_cnt = 0 
+        mat_cnt = cnt 
+    elseif scenario in ("s6", "s7", "s8", "s9")
+        scc = "s" * string(parse(Int, scenario[end]) - 5)
+        _, c1 = maternal_vaccine() 
+        _, c2 = lama_vaccine(scc)
+        lama_cnt = c2 
+        mat_cnt = c1 
+    end
+    return lama_cnt, mat_cnt
 end
 
-## Initialization Functions 
+#l# Iniltialization Functions 
 reset_params() = reset_params(ModelParameters())
 function reset_params(ip::ModelParameters)
     # the p is a global const
@@ -549,7 +555,7 @@ function maternal_vaccine(coverage=0.60)
         x.vac_mat = true # set flag to true to indicate newborn is maternally vaccinated
     end
     @info "number of newborns for MI and cost" length(newborns), total_cost
-    return total_cost
+    return total_cost, length(newborns)
 end
 
 
@@ -626,7 +632,7 @@ function lama_vaccine(strategy)
         x.vac_lama = true # set flag to true to indicate newborn is vaccinated by lama
     end
     @info "number of newborns for LAMA and cost" length(newborns), total_costs
-    return total_costs
+    return total_costs, length(newborns)
 end
 
 function outcome_flow(x) 
