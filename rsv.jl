@@ -56,7 +56,7 @@ export humans
 function debug(sc=:s0)
     logger = NullLogger()
     global_logger(logger)
-    simulate_id = 66 ## THIS WILL SIMULATE WITH THIS SEED
+    simulate_id = 74 ## THIS WILL SIMULATE WITH THIS SEED
     # this means the init/incidence numbers should always be the same
     # use this to debug outcome analysis/ and vaccine
     Random.seed!(53 * simulate_id) # T
@@ -80,7 +80,7 @@ function simulations()
     logger = SimpleLogger(io)
     global_logger(logger)
    
-    num_of_sims = 10
+    num_of_sims = 2
     scenarios = [:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9]
     all_data = []
 
@@ -91,6 +91,7 @@ function simulations()
         for i = 1:num_of_sims
             @info "\nsim: $i sc: $sc"
             Random.seed!(53 * i) # for each simulation, set the seed so that the same number of newborns/preterms/incidence are sampled! 
+            Random.seed!(rng, 5 * i)
             nb = initialize() 
             tf = incidence()
             vc = vaccine_scenarios(sc) # this will use its own internal RNG so won't disturb the global RNG 
@@ -869,7 +870,7 @@ function outcome_analysis()
         total_inpatients += length(findall(x -> x == "inpatient", flow))
         total_outpatients += length(findall(x -> x == "outpatient", flow))
         total_non_ma += length(findall(x -> x == "nonma", flow))
-        
+
         # save all of the individual level information as a named tuple -- will be turned into a dataframe to store as a CSV 
         # qaly_tup = NamedTuple(Symbol(k) => v for (k,v) in qalys)
         # cost_tup = NamedTuple(Symbol(k) => v for (k,v) in costs)
