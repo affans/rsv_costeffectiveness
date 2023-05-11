@@ -48,5 +48,6 @@ function test_outcome_flows()
     x.eff_hosp = zeros(Float64, 24)
     x.eff_icu = zeros(Float64, 24) #zeros(Float64, 24)
     dump(x)
-    outcome_flow(x)
+    s, f = outcome_flow(x)
+    calculate_qaly(x, s)
 end

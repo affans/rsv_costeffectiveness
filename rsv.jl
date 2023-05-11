@@ -674,6 +674,9 @@ function outcome_flow(x)
     )
 
     for ic in 1:infcnt_max  
+        if sampled_days["death"] > 0  # if the person is sampled to be death
+            continue 
+        end
         push!(flow, "INF$ic")
         push!(flow, "symptomatic")
 
@@ -739,7 +742,7 @@ function outcome_flow(x)
                 end
             else 
                 push!(flow, "death")
-                sampled_days["death"] += 1
+                sampled_days["death"] += ic # by assigning death as ic (1 or 2) it gives us an indication of when death happened
             end
         else # is either office ot ED
             push!(flow, "outpatient")
@@ -767,14 +770,23 @@ function calculate_qaly(x, sampled_days)
     q_icu = sampled_days["icu"] / 365 * (1 - rand(qaly_icu))
     q_wheezing = sampled_days["wheezing"] / 365 * (1 - rand(qaly_wheezing))
     
+    # if a infant is dead, they have a loss of qaly from the time they die 
+    # slight bug in the code: only consider death after the second infection (they could die at the first infection)
+    # IN BOTH QALY AND COST, better to use `flow` to check for death
+    daysdead = 0
+    if sampled_days["death"] > 0 # since death can be 1 or 2
+        infcnt = sampled_days["death"] # will be either 1 or 2 
+        daysdead = (12 - x.rsvmonth[infcnt])*30 
+    end
+
     # calculate the non-RSV QALY 
-    non_rsv_days = (365 - sampled_days["symptomatic"] - sampled_days["pediatricward"] - sampled_days["icu"]  - sampled_days["wheezing"]) / 365
+    non_rsv_days = (365 - sampled_days["symptomatic"] - sampled_days["pediatricward"] - sampled_days["icu"]  - sampled_days["wheezing"] - daysdead) / 365
     non_rsv_qaly = non_rsv_days * (1 - rand(qaly_prior_to_infection))
     
     # calculate the total QALY for the infant (non rsv + rsv)
     totalqalys = non_rsv_qaly + q_symp + q_pediatricward + q_icu + q_wheezing
 
-    q_loss_due_to_death = sampled_days["death"] * 45.3
+    q_loss_due_to_death = sampled_days["death"] > 0 ? 45.3 : 0 
     return totalqalys, q_loss_due_to_death
 end
 
@@ -826,7 +838,7 @@ function calculate_costs(x, sampled_days)
         cw
     end
     costs["cost_outpatient"] = (sampled_days["emergencydept"] * 342) + (sampled_days["office_consultation"] * 229) 
-    cost_due_to_death = sampled_days["death"] * 2292572
+    cost_due_to_death = sampled_days["death"] > 0 ? 2292572 : 0
     return sum(values(costs)), cost_due_to_death
 end
 
