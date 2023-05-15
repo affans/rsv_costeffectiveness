@@ -87,7 +87,7 @@ function simulations()
     Random.seed!(rng, abs(rand(Int16)))  # set the seed randomly for the vaccine functions
 
     @showprogress 0.5 for sc in scenarios 
-        sc_data = zeros(Float64, num_of_sims, 10)
+        sc_data = zeros(Float64, num_of_sims, 11)
         for i = 1:num_of_sims
             @info "\nsim: $i sc: $sc"
             Random.seed!(53 * i) # for each simulation, set the seed so that the same number of newborns/preterms/incidence are sampled! 
@@ -95,8 +95,8 @@ function simulations()
             nb = initialize() 
             tf = incidence()
             lc, mc = vaccine_scenarios(sc) # this will use its own internal RNG so won't disturb the global RNG 
-            nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis() 
-            sc_data[i,  :] .= [nbs, lc, mc, rc, dc, ql, qd, inpats, outpats, non_ma]
+            nbs, ql, qd, rc, dc, inpats, outpats, non_ma, hospdays = outcome_analysis() 
+            sc_data[i,  :] .= [nbs, lc, mc, rc, dc, ql, qd, inpats, outpats, non_ma, hospdays]
         end
         push!(all_data, sc_data)
     end
@@ -104,7 +104,7 @@ function simulations()
     close(io)
    
     # generate colnames for Seyed's preferred format
-    colnames = ["_newborns", "_lama_cnt", "_mat_cnt", "_rsvcost", "_deathcost", "_totalqalys", "qalylost_death", "_inpatients", "_outpatients", "_non_ma"]
+    colnames = ["_newborns", "_lama_cnt", "_mat_cnt", "_rsvcost", "_deathcost", "_totalqalys", "qalylost_death", "_inpatients", "_outpatients", "_non_ma", "_hospdays"]
     scnames = string.(scenarios)
     dfnames = vcat([sc .* colnames for sc in scnames]...)
     
@@ -726,8 +726,8 @@ function outcome_flow(x)
         prob_icu = x.preterm ? 0.154 : 0.13
         prob_icu = prob_icu * (1 - x.eff_icu[rm])
        
-        # probability of recovery/death depends on preterm (but not gestation) but not affected by vaccine 
-        _prob_recoveries = [0.081, 0.033, 0.033]
+        # probability of death depends on preterm (but not gestation) but not affected by vaccine 
+        _prob_recoveries = [0.081, 0.011, 0.0013]
         prob_recovery = x.preterm ? _prob_recoveries[x.gestation] : 0.005
      
         # outcome flows for inpatient/outpatient, icu/ward, wheezing, and recovery/death
@@ -867,6 +867,7 @@ function outcome_analysis()
     total_inpatients = 0 
     total_outpatients = 0
     total_non_ma = 0 
+    total_hosp_days = 0 
 
     
     for (i, h) in enumerate(newborns) 
@@ -874,6 +875,9 @@ function outcome_analysis()
         sampled_days, flow = outcome_flow(x)  # simulate outcomes for the RSV infant
         @info "flow chart for id $i: $(join(flow, " => "))" 
         
+        # add the total hospital days 
+        total_hosp_days += sampled_days["icu"] + sampled_days["pediatricward"]
+
         # calculate qalys and costs
         tq, ql = calculate_qaly(x, sampled_days) 
         tc, cl = calculate_costs(x, sampled_days)
@@ -899,7 +903,7 @@ function outcome_analysis()
     #CSV.write("./output/sim_$(randstring(5)).csv", df)
     #return qalyslost
 
-    return length(newborns), totalqalys, qalyslost_death, totalcosts, totalcosts_death, total_inpatients, total_outpatients, total_non_ma
+    return length(newborns), totalqalys, qalyslost_death, totalcosts, totalcosts_death, total_inpatients, total_outpatients, total_non_ma, total_hosp_days
 end
 
 
