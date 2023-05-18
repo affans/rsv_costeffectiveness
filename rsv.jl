@@ -81,7 +81,7 @@ function simulations()
     global_logger(logger)
    
     num_of_sims = 2
-    scenarios = String.([:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9])
+    scenarios = String.([:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9, "s10"])
     all_data = []
 
     Random.seed!(rng, abs(rand(Int16)))  # set the seed randomly for the vaccine functions
@@ -132,6 +132,9 @@ function vaccine_scenarios(scenario)
         _, c2 = lama_vaccine(scc)
         lama_cnt = c2 
         mat_cnt = c1 
+    elseif scenario == "s10" 
+        _, mat_cnt = maternal_vaccine()
+        _, lama_cnt = lama_vaccine("s5")
     end
     return lama_cnt, mat_cnt
 end
@@ -562,15 +565,15 @@ end
 function lama_eligible(sc) 
     # LAMA vaccine is incremental. 
     # so LAMA 2 should include all the selected people from LAMA 1 
-    # LAMA 3 should add on top of LAMA 2, etc etc
+    # and LAMA 3 should add on top of LAMA 2, and so on
 
-    # get the baseline LAMA 1
-    nb_s1 = Set(findall(x -> x.newborn == true && x.gestation in (1, 2), humans))
-    nb_s2 = Set(findall(x -> x.newborn == true && x.preterm == true, humans))
-    nb_s3 = Set(findall(x -> x.newborn == true && x.monthborn in 7:12, humans))
-    nb_s4 = Set(findall(x -> x.newborn == true, humans))
+    nb_s1 = Set(findall(x -> x.newborn == true && x.gestation in (1, 2), humans)) # LAMA 1
+    nb_s2 = Set(findall(x -> x.newborn == true && x.preterm == true, humans)) # LAMA 2
+    nb_s3 = Set(findall(x -> x.newborn == true && x.monthborn in 7:12, humans)) # LAMA 3
+    nb_s4 = Set(findall(x -> x.newborn == true, humans)) # LAMA 4
     nb = [nb_s1, nb_s2, nb_s3, nb_s4]
-    
+
+    # take the set differences to get the incremental infants added after each step
     elig_s1 = setdiff(nb_s1, Set([])) # doesn't do anything
     elig_s2 = setdiff(nb_s2, nb_s1)
     elig_s3 = setdiff(nb_s3, nb_s2, nb_s1) # essentiall all infants in 7:12, but not preterms (since thats s2)
@@ -580,19 +583,30 @@ function lama_eligible(sc)
     _vecs = collect.([elig_s1, elig_s2, elig_s3, elig_s4])
     @info ("length vecs: $(length.(_vecs))")
     
-    # calculate 90% coverage for each group, and then sample these counts 
-    # make sure that you are passing in the vaccine specific RNG and `replace=false` to sample without replacement
-    coverage = 0.90
-    covlengths = Int.(round.(coverage .* length.(_vecs))) # 90% of their total lengths... 
-    eligible_per_strategy = sample.(rng, _vecs, covlengths, replace=false)
-    
-    total_eligible = @match sc begin 
-        "s1" => [eligible_per_strategy[1]...]
-        "s2" => [eligible_per_strategy[1]..., eligible_per_strategy[2]...]
-        "s3" => [eligible_per_strategy[1]..., eligible_per_strategy[2]..., eligible_per_strategy[3]...]
-        "s4" => [eligible_per_strategy[1]..., eligible_per_strategy[2]..., eligible_per_strategy[3]..., eligible_per_strategy[4]...]
-        _ =>  error("wrong strategy for lama vaccination")
+    if sc == "s5"
+        # this is a special combination of LAMA 1 and LAMA 2 
+        # its 80% of all gestation 1/2 and 5% of gestation 3 
+        _nl1 = Int(round(0.80 * length(_vecs[1])))
+        _nl2 = Int(round(0.05 * length(_vecs[2])))
+        eligible_l1 = sample(rng, _vecs[1], _nl1, replace=false)
+        eligible_l2 = sample(rng, _vecs[2], _nl2, replace=false)
+        total_eligible = [eligible_l1..., eligible_l2...]
+    else 
+        # calculate 90% coverage for each group, and then sample these counts 
+        # make sure that you are passing in the vaccine specific RNG and `replace=false` to sample without replacement
+        coverage = 0.90
+        covlengths = Int.(round.(coverage .* length.(_vecs))) # 90% of their total lengths... 
+        eligible_per_strategy = sample.(rng, _vecs, covlengths, replace=false)
+        
+        total_eligible = @match sc begin 
+            "s1" => [eligible_per_strategy[1]...]
+            "s2" => [eligible_per_strategy[1]..., eligible_per_strategy[2]...]
+            "s3" => [eligible_per_strategy[1]..., eligible_per_strategy[2]..., eligible_per_strategy[3]...]
+            "s4" => [eligible_per_strategy[1]..., eligible_per_strategy[2]..., eligible_per_strategy[3]..., eligible_per_strategy[4]...]
+            _ =>  error("wrong strategy for lama vaccination")
+        end
     end
+    
     return total_eligible
 end
 
@@ -610,6 +624,7 @@ function lama_vaccine(strategy)
         "s2" => length(newborns) * 1000
         "s3" => length(newborns) * 1000
         "s4" => 1088 * 550 # ALL 1088 BABIES ARE VACCINATED -- IF CHANGING THE NUMBER OF BABIES, UPDATE THIS VALUE
+        "s5" => length(newborns) * 1000
         _ =>  error("wrong strategy for lama vaccination")
     end
 
