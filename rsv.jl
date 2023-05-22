@@ -37,30 +37,28 @@ Base.@kwdef mutable struct ModelParameters    ## use @with_kw from Parameters
     modeltime::Int64 = 300
 end
 
-const rng = MersenneTwister(422) # create a random number object... this is only for use in the vaccine functions
+const vax_rng = MersenneTwister(422) # create a random number object... this is only for use in the vaccine functions
 const humans = Array{Human}(undef, 0) 
 const p = ModelParameters()  ## setup default parameters
 const ON_POP = 13448500 # 13448495 from ontario database, but their numbers don't add up
 pc(x) = Int(round(x / ON_POP * 100000)) # 13_448_495: max population in ontario 
+export humans
 
-# create (disutility) distributions for QALY calculations
+# create constant (disutility) distributions for QALY calculations
 const qaly_prior_to_infection = Beta(19.2, 364.6)
 const qaly_symptomatic = Beta(53.6, 281.4)
 const qaly_pediatricward = Beta(109.7, 157.9)
 const qaly_icu = Beta(159.4, 106.2)
 const qaly_wheezing = Beta(14.1, 338.4)
 
-export humans
-
-
 function debug(sc="s0")
     logger = NullLogger()
     global_logger(logger)
-    simulate_id = 74 ## THIS WILL SIMULATE WITH THIS SEED
+    simulate_id = 1 ## THIS WILL SIMULATE WITH THIS SEED
     # this means the init/incidence numbers should always be the same
     # use this to debug outcome analysis/ and vaccine
     Random.seed!(53 * simulate_id) # T
-    Random.seed!(rng, 5)  # set the seed randomly for the vaccine functions
+    Random.seed!(vax_rng, 5)  # set the seed randomly for the vaccine functions
     reset_params()  # reset the parameters for the simulation scenario    
     nb = initialize() 
     println("total newborns: $nb")
@@ -69,6 +67,8 @@ function debug(sc="s0")
     vc = vaccine_scenarios(sc) # s0 no vaccine
     println("vaccine cnts: $vc")
     nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis()
+    println("total qalys: $ql")
+    return ql
 end
 
 function simulations() 
@@ -84,14 +84,15 @@ function simulations()
     scenarios = String.([:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9, "s10"])
     all_data = []
 
-    Random.seed!(rng, abs(rand(Int16)))  # set the seed randomly for the vaccine functions
+    Random.seed!(vax_rng, abs(rand(Int16)))  # set the seed randomly for the vaccine functions
 
     @showprogress 0.5 for sc in scenarios 
         sc_data = zeros(Float64, num_of_sims, 11)
         for i = 1:num_of_sims
             @info "\nsim: $i sc: $sc"
-            Random.seed!(53 * i) # for each simulation, set the seed so that the same number of newborns/preterms/incidence are sampled! 
-            Random.seed!(rng, 5 * i)
+            
+            Random.seed!(vax_rng, 5 * i) # set the seed for vaccine function
+            Random.seed!(53 * i) # Set GLOBAL RNG SEED for each simulation so that the same number of newborns/preterms/incidence are sampled! 
             nb = initialize() 
             tf = incidence()
             lc, mc = vaccine_scenarios(sc) # this will use its own internal RNG so won't disturb the global RNG 
@@ -237,8 +238,6 @@ function initialize()
     end
 
     # @info some statistics for debug purposes
-        
-    
     newborns = findall(x -> x.monthborn >= 1, humans)
     newborns_tracked = findall(x -> x.monthborn >= 1 && x.newborn == true, humans)
     preterm = findall(x -> x.monthborn >= 1 && x.preterm == true, humans)
@@ -537,7 +536,7 @@ end
 
 function maternal_vaccine(coverage=0.60) 
     # all newborns get maternal vaccine with some coverage
-    newborns = findall(x -> x.newborn == true && rand(rng) < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
+    newborns = findall(x -> x.newborn == true && rand(vax_rng) < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
     total_cost = length(newborns) * 100
     
     # define efficacy values over 12 months from time of administration
@@ -588,15 +587,15 @@ function lama_eligible(sc)
         # its 80% of all gestation 1/2 and 5% of gestation 3 
         _nl1 = Int(round(0.80 * length(_vecs[1])))
         _nl2 = Int(round(0.05 * length(_vecs[2])))
-        eligible_l1 = sample(rng, _vecs[1], _nl1, replace=false)
-        eligible_l2 = sample(rng, _vecs[2], _nl2, replace=false)
+        eligible_l1 = sample(vax_rng, _vecs[1], _nl1, replace=false)
+        eligible_l2 = sample(vax_rng, _vecs[2], _nl2, replace=false)
         total_eligible = [eligible_l1..., eligible_l2...]
     else 
         # calculate 90% coverage for each group, and then sample these counts 
         # make sure that you are passing in the vaccine specific RNG and `replace=false` to sample without replacement
         coverage = 0.90
         covlengths = Int.(round.(coverage .* length.(_vecs))) # 90% of their total lengths... 
-        eligible_per_strategy = sample.(rng, _vecs, covlengths, replace=false)
+        eligible_per_strategy = sample.(vax_rng, _vecs, covlengths, replace=false)
         
         total_eligible = @match sc begin 
             "s1" => [eligible_per_strategy[1]...]
@@ -657,7 +656,7 @@ function outcome_flow(x)
     # for all probability checks (for outcomes), use an agent-specific agent 
     # this is because we want the outcomes to be same for each scenario (but inpatient/outpatient probabilities change due to vaccine) 
     # we don't have to use this for SAMPLED_DAYS -- use the default RNG for that. 
-    rng2 = MersenneTwister(x.idx)
+    outcomes_RNG = MersenneTwister(x.idx)
 
     # setup fixed distributions for inpatient/outpatient, wheezing, and ED
     prob_inpatient_fullterm = [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] ./ 100
@@ -666,7 +665,7 @@ function outcome_flow(x)
     prob_inpatient_preterm_3 =  [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] ./ 100
     prob_inpatient_preterm = [prob_inpatient_preterm_1, prob_inpatient_preterm_2, prob_inpatient_preterm_3]
     prob_wheezing = 0.31 
-    prob_emergencydept = rand(rng2, Uniform(0.4, 0.5))
+    prob_emergencydept = rand(outcomes_RNG, Uniform(0.4, 0.5))
 
     days_symptomatic_distr = Uniform(5, 8) # distribution for the number of symptomatic days
 
@@ -675,7 +674,7 @@ function outcome_flow(x)
    
     # check if second episode happens within 12 months (we already know that the first episode for argument x is happening)
     infcnt_max = 1 # we know there is minimum one episode 
-    if x.rsvpositive == 2 # if two symptomatic episodes, check whether it happens within 12 months 
+    if x.rsvpositive == 2 # if two symptomatic episodes, check whether the second episode happens within 12 months 
         diff = x.rsvmonth[2] - x.monthborn[1]
         infcnt_max = diff <= 11 ? 2 : 1
     end
@@ -701,12 +700,14 @@ function outcome_flow(x)
         push!(flow, "INF$ic")
         push!(flow, "symptomatic")
 
-        rn_outpatient = rand(rng2)
-        rn_inpatient = rand(rng2)
-        rn_icu = rand(rng2)
-        rn_recovery = rand(rng2)
-        rn_wheezing = rand(rng2)
-        rn_emergency = rand(rng2)
+        # coin toss to check against probabilities of each outcome 
+        # we do it here to maintain sequence of random numbers. 
+        rn_outpatient = rand(outcomes_RNG)
+        rn_inpatient = rand(outcomes_RNG)
+        rn_icu = rand(outcomes_RNG)
+        rn_recovery = rand(outcomes_RNG)
+        rn_wheezing = rand(outcomes_RNG)
+        rn_emergency = rand(outcomes_RNG)
 
         rt = x.rsvtype[ic] 
         rm = x.rsvmonth[ic]
@@ -718,7 +719,7 @@ function outcome_flow(x)
 
         # for every single rsv episode, sample the number of symptomatic days 
         # reduce the number of symptomatic days by 60% if person is NON-MA (or becomes NON MA due to vaccine)
-        days_symptomatic = rand(days_symptomatic_distr)
+        days_symptomatic = rand(outcomes_RNG, days_symptomatic_distr)
         if rt == 2 || outpatient_ct
             days_symptomatic = days_symptomatic * (1 - 0.60)
         end
@@ -746,7 +747,7 @@ function outcome_flow(x)
         prob_recovery = x.preterm ? _prob_recoveries[x.gestation] : 0.005
      
         # outcome flows for inpatient/outpatient, icu/ward, wheezing, and recovery/death
-        if rn_inpatient < prob_inpatient     
+        if rn_inpatient < prob_inpatient  
             push!(flow, "inpatient")
             if rn_icu < prob_icu 
                 push!(flow, "icu")
@@ -785,6 +786,9 @@ function outcome_flow(x)
 end
 
 function calculate_qaly(x, sampled_days) 
+
+    Random.seed!((x.idx - 1) * 42) # reset the seed here for each individual 
+
     # calculate the QALYs due to type of RSV episode
     q_symp = sampled_days["symptomatic"] / 365 * (1 - rand(qaly_symptomatic))
     q_pediatricward = sampled_days["pediatricward"] / 365 * (1 - rand(qaly_pediatricward))
@@ -874,7 +878,7 @@ function outcome_analysis()
     @info "\ntotal rsv positive newborns: $(length(_nbpos)) \nthose with first infection in first year:$(length(newborns))"
 
     # initialize empty vectors to save all outcome data
-    # data = [] -- use if saving all the individual level outcome data -- not really neccessary  
+    # data = [] # -- use if saving all the individual level outcome data -- not really neccessary  
     totalqalys = 0
     qalyslost_death = 0 
     totalcosts = 0
@@ -884,7 +888,6 @@ function outcome_analysis()
     total_non_ma = 0 
     total_hosp_days = 0 
 
-    
     for (i, h) in enumerate(newborns) 
         x = humans[h]   
         sampled_days, flow = outcome_flow(x)  # simulate outcomes for the RSV infant
@@ -907,25 +910,21 @@ function outcome_analysis()
         total_inpatients += length(findall(x -> x == "inpatient", flow))
         total_outpatients += length(findall(x -> x == "outpatient", flow))
         total_non_ma += length(findall(x -> x == "nonma", flow))
-
         # save all of the individual level information as a named tuple -- will be turned into a dataframe to store as a CSV 
-        # qaly_tup = NamedTuple(Symbol(k) => v for (k,v) in qalys)
-        # cost_tup = NamedTuple(Symbol(k) => v for (k,v) in costs)
-        # push!(data, (;x.idx, x.monthborn, x.preterm, x.vac_lama, x.vac_mat, infection_tup(x)..., qaly_tup..., cost_tup...))
+        # flowend = flow[end]
+        # push!(data, (;x.idx, x.monthborn, x.preterm, x.vac_lama, x.vac_mat, infection_tup(x)..., tq, ql, flowend))
     end
     # save simulation specific data as a csv file for debug purposes later
-    #df = DataFrame(data) 
-    #CSV.write("./output/sim_$(randstring(5)).csv", df)
+    # df = DataFrame(data) 
+    # CSV.write("./output/sim_$(randstring(5)).csv", df)
     #return qalyslost
 
     return length(newborns), totalqalys, qalyslost_death, totalcosts, totalcosts_death, total_inpatients, total_outpatients, total_non_ma, total_hosp_days
 end
 
-
 function infection_tup(x) 
     # this function returns a named n-tuple of rsvmonth and rsvtype for both episodes (-99 if there is no second episode)
     # the argument expects atleast a single infection, otherwise will crash. 
-
     rsvmonth1 = x.rsvmonth[1]
     rsvtype1 = x.rsvtype[1]
     rsvmonth2 = -99
@@ -939,3 +938,23 @@ function infection_tup(x)
     end
     (; rsvmonth1, rsvtype1, rsvmonth2, rsvtype2)
 end
+
+# function test_qaly_distributions() 
+#     # plots the PDFs of the QALY distributions 
+#     a = hist(rand(qaly_prior_to_infection, 10000), bs=0.005)
+#     b = hist(rand(qaly_symptomatic, 10000), bs=0.005)
+#     c = hist(rand(qaly_pediatricward, 10000), bs=0.005)
+#     d = hist(rand(qaly_icu, 10000), bs=0.005)
+#     e = hist(rand(qaly_wheezing, 10000), bs=0.005)
+#     dd = [a, b, c, d, e]
+#     #h = hist(e, bs = 0.005)
+#     @gp "reset" 
+#     @gp :- a.bins a.counts "with boxes title 'non-rsv'" :- 
+#     @gp :- b.bins b.counts "with boxes title 'symp'" :- 
+#     @gp :- c.bins c.counts "with boxes title 'ward'" :- 
+#     @gp :- d.bins d.counts "with boxes title 'icu'" :- 
+#     @gp :- e.bins e.counts "with boxes title 'wheezing'" :- 
+#     display(@gp)
+#     #@gp "reset"
+#     #@gp :- h.bins h.counts 
+# end
