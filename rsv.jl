@@ -54,7 +54,7 @@ const qaly_wheezing = Beta(14.1, 338.4)
 function debug(sc="s0")
     logger = NullLogger()
     global_logger(logger)
-    simulate_id = 1 ## THIS WILL SIMULATE WITH THIS SEED
+    simulate_id = 440 ## THIS WILL SIMULATE WITH THIS SEED
     # this means the init/incidence numbers should always be the same
     # use this to debug outcome analysis/ and vaccine
     Random.seed!(53 * simulate_id) # T
@@ -80,7 +80,7 @@ function simulations()
     logger = SimpleLogger(io)
     global_logger(logger)
    
-    num_of_sims = 2
+    num_of_sims = 1000
     scenarios = String.([:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9, "s10"])
     all_data = []
 
@@ -90,7 +90,6 @@ function simulations()
         sc_data = zeros(Float64, num_of_sims, 11)
         for i = 1:num_of_sims
             @info "\nsim: $i sc: $sc"
-            
             Random.seed!(vax_rng, 5 * i) # set the seed for vaccine function
             Random.seed!(53 * i) # Set GLOBAL RNG SEED for each simulation so that the same number of newborns/preterms/incidence are sampled! 
             nb = initialize() 
@@ -801,9 +800,11 @@ function calculate_qaly(x, sampled_days)
     daysdead = 0
     if sampled_days["death"] > 0 # since death can be 1 or 2
         infcnt = sampled_days["death"] # will be either 1 or 2 
-        daysdead = (12 - x.rsvmonth[infcnt])*30 
+        #daysdead = (x.monthborn - x.rsvmonth[infcnt])*30 
+        #daysdead = (12 - mod(x.rsvmonth[infcnt], 12) + 1) * 30 # multiply months dead by 30 days
+        daysdead = (12 - mod(x.rsvmonth[infcnt] - x.monthborn, 12)) * 30 
     end
-
+    
     # calculate the non-RSV QALY 
     non_rsv_days = (365 - sampled_days["symptomatic"] - sampled_days["pediatricward"] - sampled_days["icu"]  - sampled_days["wheezing"] - daysdead) / 365
     non_rsv_qaly = non_rsv_days * (1 - rand(qaly_prior_to_infection))
@@ -905,11 +906,10 @@ function outcome_analysis()
         totalcosts_death += cl
 
         # calculate number of inpatient/outpatient/ non-MA episodes
-        
-        
         total_inpatients += length(findall(x -> x == "inpatient", flow))
         total_outpatients += length(findall(x -> x == "outpatient", flow))
         total_non_ma += length(findall(x -> x == "nonma", flow))
+
         # save all of the individual level information as a named tuple -- will be turned into a dataframe to store as a CSV 
         # flowend = flow[end]
         # push!(data, (;x.idx, x.monthborn, x.preterm, x.vac_lama, x.vac_mat, infection_tup(x)..., tq, ql, flowend))
