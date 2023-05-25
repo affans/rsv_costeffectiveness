@@ -96,8 +96,7 @@ function simulations()
     global_logger(logger)
    
     p.numofsims = 10
-    scenarios = String.([:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9, "s10"])
-    scenarios = String.([:s0, :s1])
+    scenarios = String.([:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9, :s10])
     all_data = []
 
     Random.seed!(53) # start simulations by setting a seed - ensures reproducibilty
