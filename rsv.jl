@@ -6,6 +6,7 @@ using Base.Filesystem
 using CSV, DataFrames
 using Match
 using Logging, ProgressMeter
+import LatinHypercubeSampling.randomLHC
 
 # define an agent and all agent properties
 Base.@kwdef mutable struct Human
@@ -35,6 +36,7 @@ Base.show(io::IO, ::MIME"text/plain", z::Human) = dump(z)
 Base.@kwdef mutable struct ModelParameters    ## use @with_kw from Parameters
     popsize::Int64 = 100000
     modeltime::Int64 = 300
+    numofsims::Int64 = 1000
 end
 
 const vax_rng = MersenneTwister(422) # create a random number object... this is only for use in the vaccine functions
@@ -51,6 +53,18 @@ const qaly_pediatricward = Beta(109.7, 157.9)
 const qaly_icu = Beta(159.4, 106.2)
 const qaly_wheezing = Beta(14.1, 338.4)
 
+# setup fixed distributions for hosptialization and mortality, 
+# these will get populated by global functions 
+# used in `outcome_flow`, values will be adjusted by vaccine efficacy in `outcome_flow`
+const prob_inpatient_fullterm  = zeros(Float64, 12)
+const prob_inpatient_preterm_1 = zeros(Float64, 12)
+const prob_inpatient_preterm_2 = zeros(Float64, 12)
+const prob_inpatient_preterm_3 = zeros(Float64, 12)
+const prob_inpatient_preterm = [prob_inpatient_preterm_1, prob_inpatient_preterm_2, prob_inpatient_preterm_3]
+const prob_wheezing = 0.31 
+const prob_death_rate = zeros(Float64, 4)
+const days_symptomatic_distr = Uniform(5, 8) # distribution for the number of symptomatic days
+
 function debug(sc="s0")
     logger = NullLogger()
     global_logger(logger)
@@ -59,6 +73,7 @@ function debug(sc="s0")
     # use this to debug outcome analysis/ and vaccine
     Random.seed!(53 * simulate_id) # T
     Random.seed!(vax_rng, 5)  # set the seed randomly for the vaccine functions
+    #println("init seed: $(Random.GLOBAL_SEED)")
     reset_params()  # reset the parameters for the simulation scenario    
     nb = initialize() 
     println("total newborns: $nb")
@@ -80,29 +95,47 @@ function simulations()
     logger = SimpleLogger(io)
     global_logger(logger)
    
-    num_of_sims = 1000
+    p.numofsims = 10
     scenarios = String.([:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9, "s10"])
+    scenarios = String.([:s0, :s1])
     all_data = []
 
-    Random.seed!(vax_rng, abs(rand(Int16)))  # set the seed randomly for the vaccine functions
-
+    Random.seed!(53) # start simulations by setting a seed - ensures reproducibilty
+   
+    # generate hospitalization rates for each simulation using LHC 
+    p1, p2, p3, ft = generate_hospitalization_rates() 
+    mortality_rates = generate_mortality_rates()
+    
     @showprogress 0.5 for sc in scenarios 
-        sc_data = zeros(Float64, num_of_sims, 11)
-        for i = 1:num_of_sims
+        sc_data = zeros(Float64, p.numofsims, 11)
+        for i = 1:p.numofsims
             @info "\nsim: $i sc: $sc"
+
+            # set relevant seeds for each simulation 
             Random.seed!(vax_rng, 5 * i) # set the seed for vaccine function
             Random.seed!(53 * i) # Set GLOBAL RNG SEED for each simulation so that the same number of newborns/preterms/incidence are sampled! 
-            nb = initialize() 
-            tf = incidence()
-            lc, mc = vaccine_scenarios(sc) # this will use its own internal RNG so won't disturb the global RNG 
-            nbs, ql, qd, rc, dc, inpats, outpats, non_ma, hospdays = outcome_analysis() 
+
+            # assign the hospitalization, mortality rates to the constant variables
+            prob_inpatient_preterm_1 .= p1[i, :]
+            prob_inpatient_preterm_2 .= p2[i, :]
+            prob_inpatient_preterm_3 .= p3[i, :]
+            prob_inpatient_fullterm .= ft[i, :]
+            prob_death_rate .= mortality_rates[i, :]
+
+            # run model functions
+            nb = initialize() # initialize the human population 
+            tf = incidence() # sample the total number of infected individuals
+            lc, mc = vaccine_scenarios(sc) # apply vaccine dynamics
+            nbs, ql, qd, rc, dc, inpats, outpats, non_ma, hospdays = outcome_analysis() # perform outcome analysis 
+
+            # store simulation data
             sc_data[i,  :] .= [nbs, lc, mc, rc, dc, ql, qd, inpats, outpats, non_ma, hospdays]
         end
         push!(all_data, sc_data)
     end
     flush(io)
     close(io)
-   
+
     # generate colnames for Seyed's preferred format
     colnames = ["_newborns", "_lama_cnt", "_mat_cnt", "_rsvcost", "_deathcost", "_totalqalys", "qalylost_death", "_inpatients", "_outpatients", "_non_ma", "_hospdays"]
     scnames = string.(scenarios)
@@ -648,30 +681,87 @@ function lama_vaccine(strategy)
     return total_costs, length(newborns)
 end
 
+function _generate_hosp_lhc(lows, highs)
+    # generate LHC given a range lows and high vectors
+    @assert length(lows) == 12 
+    @assert length(highs) == 12 
+    res = zeros(Float64, p.numofsims, 12)
+    lhc = randomLHC(p.numofsims, 12) ./ p.numofsims # 4 dimensions for preterm1,2, 3 (fullterm is same as 3) + mortality
+    for mth in 1:12
+        res[:, mth] .= @. lows[mth] + lhc[:, mth]*(highs[mth] - lows[mth])
+    end
+    return res
+end
+
+function generate_hospitalization_rates(;means=false)   
+    # function generates the hosptialization probabilities 
+    # using LHC for each preterm and fullterm  
+    # the return value is a matrix of num_of_simulations x 12 (mo∏nths)
+    # so for each simulation, we pick the corresponding row.
+    # if `means = true` then all simulation indices are just populated with the mean
+
+    # range lows and highs for preterm1, preterm2, preterm3, and fullterm
+    p1l = [5.28, 9.33, 6.66, 4.68, 4.05, 2.46, 2.10, 2.37, 1.77, 1.95, 1.77, 1.47] 
+    p1h = [6.84, 13.11, 7.26, 5.22, 4.50, 3.24, 2.88, 2.85, 2.16, 2.52, 1.89, 1.77]
+    p2l = [3.52, 6.22, 4.44, 3.12, 2.70, 1.64, 1.40, 1.58, 1.18, 1.30, 1.18, 0.98]
+    p2h = [4.56, 8.74, 4.84, 3.48, 3.00, 2.16, 1.92, 1.90, 1.44, 1.68, 1.26, 1.18]
+    p3l = [1.76, 3.11, 2.22, 1.56, 1.35, 0.82, 0.70, 0.79, 0.59, 0.65, 0.59, 0.49]
+    p3h = [2.28, 4.37, 2.42, 1.74, 1.50, 1.08, 0.96, 0.95, 0.72, 0.84, 0.63, 0.59]
+    fl = [1.76, 3.11, 2.22, 1.56, 1.35, 0.82, 0.70, 0.79, 0.59, 0.65, 0.59, 0.49]
+    fh = [2.28, 4.37, 2.42, 1.74, 1.50, 1.08, 0.96, 0.95, 0.72, 0.84, 0.63, 0.59]
+    
+    # mean values 
+    p1m = [6.06, 11.22, 6.96, 4.95, 4.275, 2.85, 2.49, 2.61, 1.965, 2.235, 1.83, 1.62] 
+    p2m = [4.04, 7.48, 4.64, 3.3, 2.85, 1.9, 1.66, 1.74, 1.31, 1.49, 1.22, 1.08] 
+    p3m = [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] 
+    fm = [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] 
+    if means 
+        preterm1 = reshape(repeat(p1m, inner=p.numofsims), (p.numofsims, 12)) ./ 100
+        preterm2 = reshape(repeat(p2m, inner=p.numofsims), (p.numofsims, 12)) ./ 100 
+        preterm3 = reshape(repeat(p3m, inner=p.numofsims), (p.numofsims, 12)) ./ 100
+        fullterm = reshape(repeat(fm, inner=p.numofsims), (p.numofsims, 12)) ./ 100
+    else 
+        preterm1 = _generate_hosp_lhc(p1l, p1h) ./ 100
+        preterm2 = _generate_hosp_lhc(p2l, p2h) ./ 100 
+        preterm3 = _generate_hosp_lhc(p3l, p3h) ./ 100 
+        fullterm = _generate_hosp_lhc(fl, fh) ./ 100
+    end
+    return preterm1, preterm2, preterm3, fullterm
+end
+
+function generate_mortality_rates() 
+    # 5.5% – 10.5%
+    # 0.99% – 1.21%
+    # 0.1% – 0.16%
+    # 0.02% – 0.08%
+    res = zeros(Float64, p.numofsims, 4) # HAS TO BE FOUR ENTRIES (3 for preterm, last one for full term)
+    p1 = (low=0.055,  high=0.105)
+    p2 = (low=0.0099, high=0.0121)
+    p3 = (low=0.001,  high=0.0016)
+    ft = (low=0.0002, high=0.0008)
+    
+    lhc = randomLHC(p.numofsims, 4) ./ p.numofsims
+    
+    res[:, 1] = @. p1.low + lhc[:, 1]*(p1.high - p1.low)
+    res[:, 2] = @. p2.low + lhc[:, 2]*(p2.high - p2.low)
+    res[:, 3] = @. p3.low + lhc[:, 3]*(p3.high - p3.low)
+    res[:, 4] = @. ft.low + lhc[:, 4]*(ft.high - ft.low)
+    
+    return res
+end
+
 function outcome_flow(x) 
     # this function determines the outcomes of rsv infants
     #  -- argument x: should be an initialized agent with *atleast ONE INFECTION*
 
-    # for all probability checks (for outcomes), use an agent-specific agent 
+    # for all probability checks (for outcomes), use an agent-specific RNG 
     # this is because we want the outcomes to be same for each scenario (but inpatient/outpatient probabilities change due to vaccine) 
-    # we don't have to use this for SAMPLED_DAYS -- use the default RNG for that. 
     outcomes_RNG = MersenneTwister(x.idx)
-
-    # setup fixed distributions for inpatient/outpatient, wheezing, and ED
-    prob_inpatient_fullterm = [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] ./ 100
-    prob_inpatient_preterm_1 =  [6.06, 11.22, 6.96, 4.95, 4.275, 2.85, 2.49, 2.61, 1.965, 2.235, 1.83, 1.62] ./ 100 
-    prob_inpatient_preterm_2 =  [4.04, 7.48, 4.64, 3.3, 2.85, 1.9, 1.66, 1.74, 1.31, 1.49, 1.22, 1.08] ./ 100
-    prob_inpatient_preterm_3 =  [2.02, 3.74, 2.32, 1.65, 1.425, 0.95, 0.83, 0.87, 0.655, 0.745, 0.61, 0.54] ./ 100
-    prob_inpatient_preterm = [prob_inpatient_preterm_1, prob_inpatient_preterm_2, prob_inpatient_preterm_3]
-    prob_wheezing = 0.31 
-    prob_emergencydept = rand(outcomes_RNG, Uniform(0.4, 0.5))
-
-    days_symptomatic_distr = Uniform(5, 8) # distribution for the number of symptomatic days
 
     # create empty array to store the flow of outcomes
     flow = String[]
    
-    # check if second episode happens within 12 months (we already know that the first episode for argument x is happening)
+    # check if second episode happens within 12 months (we already know that the first episode is happening)
     infcnt_max = 1 # we know there is minimum one episode 
     if x.rsvpositive == 2 # if two symptomatic episodes, check whether the second episode happens within 12 months 
         diff = x.rsvmonth[2] - x.monthborn[1]
@@ -693,13 +783,38 @@ function outcome_flow(x)
     )
 
     for ic in 1:infcnt_max  
-        if sampled_days["death"] > 0  # if the person is sampled to be death
+        if sampled_days["death"] > 0  # if the person was sampled to be dead, skip the loop. logic is that sampled_death = 0 for ic = 1
             continue 
         end
         push!(flow, "INF$ic")
         push!(flow, "symptomatic")
 
-        # coin toss to check against probabilities of each outcome 
+        # store rsvtype/month - used to adjust outcome flow probabilities 
+        rt = x.rsvtype[ic] 
+        rm = x.rsvmonth[ic]
+        !(rt in (1, 2)) && error("RSV type incorrect, required 1 or 2... given: $rt") # quick sanity check
+
+        # set up infant-specific probabilities for their flow 
+        prob_emergencydept = rand(outcomes_RNG, Uniform(0.4, 0.5))
+        
+        # probability of inpatient (adjusted by vaccine) adjusted by efficacy.
+        # prob_inpatient_preterm, prob_inpatient_fullterm are defined globally
+        distr = x.preterm ? prob_inpatient_preterm[x.gestation] : prob_inpatient_fullterm
+        diff = (rm - x.monthborn) + 1 
+        prob_inpatient = distr[diff] * (1 - x.eff_hosp[rm])    
+    
+        # probability of ICU also depends on preterm (but not gestation) and is further adjusted by efficacy.
+        prob_icu = x.preterm ? 0.154 : 0.13
+        prob_icu = prob_icu * (1 - x.eff_icu[rm])
+    
+        # probability of death depends on preterm (but not gestation) but not affected by vaccine 
+        #_prob_recoveries = [0.081, 0.011, 0.0013]  # 8.1%, 1.1%, 0.13%
+        #prob_recovery = x.preterm ? _prob_recoveries[x.gestation] : 0.005    # 0.5%
+
+        #_prob_recoveries = [0.081, 0.011, 0.0013]
+        prob_recovery = x.preterm ? prob_death_rate[x.gestation] : prob_death_rate[end]
+
+        # pre-sample the coin tosses to check against probabilities of each outcome 
         # we do it here to maintain sequence of random numbers. 
         rn_outpatient = rand(outcomes_RNG)
         rn_inpatient = rand(outcomes_RNG)
@@ -708,13 +823,14 @@ function outcome_flow(x)
         rn_wheezing = rand(outcomes_RNG)
         rn_emergency = rand(outcomes_RNG)
 
-        rt = x.rsvtype[ic] 
-        rm = x.rsvmonth[ic]
-        !(rt in (1, 2)) && error("RSV type incorrect, required 1 or 2... given: $rt") # quick error check
-
         # first efficacy endpoint, against outpatient/inpatient (i.e. MA)
         # i.e., essentially turns a MA infant to a N-MA infant (the loop will not run) 
         outpatient_ct = rn_outpatient < x.eff_outpatient[rm] 
+        # for non-ma episodes (either by sampled or by vaccine), ignore the remaining code
+        if rt == 2 || outpatient_ct
+            push!(flow, "nonma")
+            continue
+        end
 
         # for every single rsv episode, sample the number of symptomatic days 
         # reduce the number of symptomatic days by 60% if person is NON-MA (or becomes NON MA due to vaccine)
@@ -723,28 +839,8 @@ function outcome_flow(x)
             days_symptomatic = days_symptomatic * (1 - 0.60)
         end
         sampled_days["symptomatic"] += days_symptomatic
-     
-        # for non-ma episodes (either by sampled or by vaccine), ignore the remaining code
-        if rt == 2 || outpatient_ct
-            push!(flow, "nonma")
-            continue
-        end
-         
+      
         # at this point the infant is MA and will either be an outpatient or inpatient 
-        # probability of inpatient (and further ward/ICU) depends on month of infection (i.e, how many months after birth) AND preterm/gestational period
-        # this probability is further adjusted by vaccine efficacy
-        distr = x.preterm ? prob_inpatient_preterm[x.gestation] : prob_inpatient_fullterm
-        diff = (rm - x.monthborn) + 1 
-        prob_inpatient = distr[diff] * (1 - x.eff_hosp[rm])    
-       
-        # probability of ICU also depends on preterm (but not gestation) and is further adjusted by efficacy.
-        prob_icu = x.preterm ? 0.154 : 0.13
-        prob_icu = prob_icu * (1 - x.eff_icu[rm])
-       
-        # probability of death depends on preterm (but not gestation) but not affected by vaccine 
-        _prob_recoveries = [0.081, 0.011, 0.0013]
-        prob_recovery = x.preterm ? _prob_recoveries[x.gestation] : 0.005
-     
         # outcome flows for inpatient/outpatient, icu/ward, wheezing, and recovery/death
         if rn_inpatient < prob_inpatient  
             push!(flow, "inpatient")
