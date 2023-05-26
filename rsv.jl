@@ -39,6 +39,7 @@ Base.@kwdef mutable struct ModelParameters    ## use @with_kw from Parameters
     numofsims::Int64 = 1000
 end
 
+# constant variables
 const vax_rng = MersenneTwister(422) # create a random number object... this is only for use in the vaccine functions
 const humans = Array{Human}(undef, 0) 
 const p = ModelParameters()  ## setup default parameters
@@ -46,7 +47,7 @@ const ON_POP = 13448500 # 13448495 from ontario database, but their numbers don'
 pc(x) = Int(round(x / ON_POP * 100000)) # 13_448_495: max population in ontario 
 export humans
 
-# create constant (disutility) distributions for QALY calculations
+# constant (disutility) distributions for QALY calculations
 const qaly_prior_to_infection = Beta(19.2, 364.6)
 const qaly_symptomatic = Beta(53.6, 281.4)
 const qaly_pediatricward = Beta(109.7, 157.9)
@@ -68,20 +69,35 @@ const days_symptomatic_distr = Uniform(5, 8) # distribution for the number of sy
 function debug(sc="s0")
     logger = NullLogger()
     global_logger(logger)
-    simulate_id = 440 ## THIS WILL SIMULATE WITH THIS SEED
-    # this means the init/incidence numbers should always be the same
-    # use this to debug outcome analysis/ and vaccine
-    Random.seed!(53 * simulate_id) # T
-    Random.seed!(vax_rng, 5)  # set the seed randomly for the vaccine functions
-    #println("init seed: $(Random.GLOBAL_SEED)")
     reset_params()  # reset the parameters for the simulation scenario    
+   
+    # generate hospitalization rates for each simulation using LHC 
+    Random.seed!(53) # start simulations by setting a seed - ensures reproducibilty
+    p.numofsims = 1000 # we need to set this for LHS
+    p1, p2, p3, ft = generate_hospitalization_rates() 
+    mortality_rates = generate_mortality_rates()
+
+    # should be less than the number of simulations
+    simulate_id = 578 ## THIS WILL SIMULATE WITH THIS SEED
+    
+    Random.seed!(53 * simulate_id) # T
+    Random.seed!(vax_rng, 5 * simulate_id)  # set the seed randomly for the vaccine functions
+    #println("init seed: $(Random.GLOBAL_SEED)")
+
+    # assign the hospitalization, mortality rates to the constant variables
+    prob_inpatient_preterm_1 .= p1[simulate_id, :]
+    prob_inpatient_preterm_2 .= p2[simulate_id, :]
+    prob_inpatient_preterm_3 .= p3[simulate_id, :]
+    prob_inpatient_fullterm .= ft[simulate_id, :]
+    prob_death_rate .= mortality_rates[simulate_id, :]
+   
     nb = initialize() 
     println("total newborns: $nb")
     tf = incidence()
     println("total episodes sampled: $tf")
     vc = vaccine_scenarios(sc) # s0 no vaccine
     println("vaccine cnts: $vc")
-    nbs, ql, qd, rc, dc, inpats, outpats, non_ma = outcome_analysis()
+    nbs, ql, qd, rc, dc, inpats, outpats, non_ma, hospdays = outcome_analysis()
     println("total qalys: $ql")
     return ql
 end
@@ -89,13 +105,13 @@ end
 function simulations() 
     println("starting simulations")
     reset_params()  # reset the parameters for the simulation scenario    
-    
+
     # get a log file for simulations only -- save all the @info statement to files
     io = open("log.txt", "w")
     logger = SimpleLogger(io)
     global_logger(logger)
    
-    p.numofsims = 10
+    p.numofsims = 1000
     scenarios = String.([:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9, :s10])
     all_data = []
 
@@ -109,7 +125,6 @@ function simulations()
         sc_data = zeros(Float64, p.numofsims, 11)
         for i = 1:p.numofsims
             @info "\nsim: $i sc: $sc"
-
             # set relevant seeds for each simulation 
             Random.seed!(vax_rng, 5 * i) # set the seed for vaccine function
             Random.seed!(53 * i) # Set GLOBAL RNG SEED for each simulation so that the same number of newborns/preterms/incidence are sampled! 
@@ -478,11 +493,11 @@ function get_monthly_agegroup_infcnt()
     # this is split between the age groups:  #<19 d, 19–89 d, 90d to <6mo, 6mo to <1yr, 
     # order APRIL TO MARCH
     month_distr_ag1 = @SVector [0.0845, 0.0563, 0.0141, 0.0141, 0.0181, 0.0563, 0.0845, 0.1117, 0.1409, 0.1549, 0.1408, 0.1117]
-    month_distr_ag1 = @SVector [0.0845, 0.0563, 0.0141, 0.0141, 0.0181, 0.0563, 0.0845, 0.1117, 0.1409, 0.1549, 0.1408, 0.1117]
+    month_distr_ag2 = @SVector [0.0845, 0.0563, 0.0141, 0.0141, 0.0181, 0.0563, 0.0845, 0.1117, 0.1409, 0.1549, 0.1408, 0.1117]
     month_distr_ag3 = @SVector [0.0615, 0.0417, 0.0108, 0.0108, 0.0417, 0.0615, 0.0833, 0.1150, 0.1667, 0.1667, 0.115, 0.0833]
     month_distr_ag4 = @SVector [0.0714, 0.0357, 0.0357, 0.0357, 0.0357, 0.0714, 0.1071, 0.1419, 0.1430, 0.1419, 0.1071, 0.0714]
     month_distr_ag5 = @SVector [0.0556, 0.0556, 0.0556, 0.0556, 0.0556, 0.0556, 0.0556, 0.1111, 0.1663, 0.1667, 0.1111, 0.0556]
-    month_distr = [month_distr_ag1, month_distr_ag1, month_distr_ag3, month_distr_ag4, month_distr_ag5]
+    month_distr = [month_distr_ag1, month_distr_ag2, month_distr_ag3, month_distr_ag4, month_distr_ag5]
 
     # a matrix of age groups x monthly incidence (dim: 5 x 11)
     _monthly_inc = @. (yearly_incidence_per_ag * month_distr) 
@@ -745,7 +760,7 @@ function generate_mortality_rates()
     res[:, 2] = @. p2.low + lhc[:, 2]*(p2.high - p2.low)
     res[:, 3] = @. p3.low + lhc[:, 3]*(p3.high - p3.low)
     res[:, 4] = @. ft.low + lhc[:, 4]*(ft.high - ft.low)
-    
+
     return res
 end
 
