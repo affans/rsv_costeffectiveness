@@ -20,6 +20,7 @@ Base.@kwdef mutable struct Human
     gestation::Int64 = 0 # 1 = <29, 2 = 29-32 weeks, 3 = 33-35 weeks... only if preterm is true
     houseid::Int64 = 0
     sibling::Bool = false # we want to tag newborns that have a sibling <5.
+    comorbidity::Int64 = 0 # comorbidity 1 = CHD, 2 = CLD (congenital heart disease, chronic lung disease)
     rsvpositive::Int64 = 0 
     rsvmonth::Vector{Int64} = Int64[]
     rsvage::Vector{Int64} = Int64[]
@@ -91,7 +92,8 @@ function debug(sc="s0")
     prob_inpatient_fullterm .= ft[simulate_id, :]
     prob_death_rate .= mortality_rates[simulate_id, :]
    
-    nb = initialize() 
+    nb = demographics() 
+    chd, cld = apply_comorbidities()
     println("total newborns: $nb")
     tf = incidence()
     println("total episodes sampled: $tf")
@@ -137,7 +139,8 @@ function simulations()
             prob_death_rate .= mortality_rates[i, :]
 
             # run model functions
-            nb = initialize() # initialize the human population 
+            nb = demographics() # initialize the human population 
+            chd, cld = apply_comorbidities()
             tf = incidence() # sample the total number of infected individuals
             lc, mc = vaccine_scenarios(sc) # apply vaccine dynamics
             nbs, ql, qd, rc, dc, inpats, outpats, non_ma, hospdays = outcome_analysis() # perform outcome analysis 
@@ -201,7 +204,7 @@ function reset_params(ip::ModelParameters)
 end
 export reset_params
 
-function initialize() 
+function demographics() 
     # reset all agents to their default values
     for i = 1:length(humans)
         humans[i] = Human() 
@@ -293,6 +296,39 @@ function initialize()
     @info ("total preterm: $(length(preterm)), tracked: $(length(preterm_tracked))")
     @info ("gestation periods distribution $(countmap(gestperiods)), total: $(length(gestperiods))")
     return length(newborns_tracked)
+end
+
+function apply_comorbidities()
+    # go through all newborns and apply comorbidities 
+    # either 1 = CHD or 2 = CLD  
+
+    # first lets do CHD, we need to sample 1% of the population 
+    newborns = findall(x -> x.newborn == true, humans)
+    _nl1 = Int(round(0.01 * length(newborns)))    
+    eligible_chd = sample(newborns, _nl1, replace=false)
+    for id in eligible_chd 
+        x = humans[id] 
+        x.comorbidity = 1 
+    end
+
+    # lets do chronic lung disease as well 
+    # it is possible to select the same newborn that had CHD 
+    # but it will get replaced with CLD if that happens
+    g1 = findall(x -> x.newborn == true && x.gestation == 1, humans)
+    g2 = findall(x -> x.newborn == true && x.gestation == 2, humans)
+    g3 = findall(x -> x.newborn == true && x.gestation == 3, humans)
+    preterms = [g1, g2, g3]
+    
+    c1 = Int(round(0.281*length(g1)))
+    c2 = Int(round(0.04*length(g2)))
+    c3 = Int(round(0.024*length(g3)))
+    cnts = [c1, c2, c3]
+    eligible_cld = vcat(sample.(preterms, cnts, replace=false)...)
+    for id in eligible_cld 
+        x = humans[id] 
+        x.comorbidity = 2
+    end 
+    return eligible_chd, eligible_cld
 end
 
 function household() 
@@ -461,13 +497,9 @@ end
 
 function get_monthly_agegroup_infcnt() 
     # function samples the yearly counts for both MA (medically attended) and N-MA (symptomatic, non medical) 
-    # splits it over age groups
-    # and splits it over months 
-    # run this function twice if you need for two years. 
-
-    # rate? of infection from Seyed (see Excel sheet)
-    #<19 d, 19–89 d, 90d to <6mo, 6mo to <1yr, 1 to < 1 yr, 1–5 yr, 6–17 yr, 18–49 yr, 50–64 yr, 65–79 yr, ≥ 80 yr
-    # _rates_per_age = @SVector [0.051, 0.147, 0.111, 0.119, 0.166, 0.145, 0.016, 0.046, 0.053, 0.064, 0.071]
+    # splits it over age groups AND over months 
+    # (function should run once per year) 
+    # returns the total sampled counts of MA and non-MA
 
     # get medically attended (MA) counts per year/season
     rates_per_agegroup = @SVector [0.051, 0.147, 0.111, 0.119, 0.166] # <19 d, 19–89 d, 90d to <6mo, 6mo to <1yr, 1 to <2 yr
@@ -506,9 +538,7 @@ function get_monthly_agegroup_infcnt()
     monthly_agegroup_non_ma = Int.(ceil.(transpose(hcat(_monthly_nma...))))
     @info "monthly incidence (MA and N-MA)" monthly_agegroup_incidence monthly_agegroup_non_ma
 
-    
     @info "return values \nmonthly incidence (MA, N-MA) across age groups:" round.(sum(monthly_agegroup_incidence, dims=1)) round.(sum(monthly_agegroup_non_ma, dims=1))
-    
     return monthly_agegroup_incidence, monthly_agegroup_non_ma
 end 
 
