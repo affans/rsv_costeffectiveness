@@ -99,7 +99,7 @@ function simulations()
     logger = NullLogger()
     global_logger(logger)
 
-    p.numofsims = 5
+    p.numofsims = 1000
 
     scenarios = String.([:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9, :s10])
     all_data = [] # container to store the data
@@ -902,8 +902,10 @@ function outcome_flow(x)
         # probability of ICU is sampled from Uniform distributions depending on the gestation period 
         if x.gestation in (1, 2) 
             prob_icu = rand(outcomes_RNG, Uniform(41.3, 62.1)) ./ 100 
-        else 
+        elseif x.gestation == 3 
             prob_icu = rand(outcomes_RNG, Uniform(13.1, 53.6)) ./ 100 
+        else 
+            prob_icu = rand(outcomes_RNG, Uniform(5.4, 30.0)) ./ 100 
         end
         prob_icu = prob_icu * (1 - x.eff_icu[rm]) # adjust icu by vaccine efficacy
         
