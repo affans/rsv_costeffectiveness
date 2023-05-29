@@ -51,3 +51,29 @@ function test_outcome_flows()
     s, f = outcome_flow(x)
     calculate_qaly(x, s)
 end
+
+function check_s5() 
+    totalvaccinated = findall(x -> sum(x.eff_outpatient) > 0, humans)
+
+    totalg1g2 = findall(x -> x.newborn == true && x.gestation in (1, 2), humans)
+    totalg1g2_v = findall(x -> x.newborn == true && x.gestation in (1, 2) && sum(x.eff_outpatient) > 0, humans)
+
+    totalcomorbid_g3 = findall(x -> x.newborn == true && x.gestation == 3 && x.comorbidity > 0, humans)
+    totalcomorbid_g3_v = findall(x -> x.newborn == true && x.gestation == 3 && x.comorbidity > 0 && sum(x.eff_outpatient) > 0, humans)
+
+    totalcomorbid_ft = findall(x -> x.newborn == true && x.preterm == false && x.comorbidity > 0, humans)
+    totalcomorbid_ft_v = findall(x -> x.newborn == true && x.preterm == false && x.comorbidity > 0 && sum(x.eff_outpatient) > 0, humans)
+
+    n_tv = length(totalvaccinated)
+    n_g12 = length(totalg1g2)
+    n_g3 = length(totalcomorbid_g3)
+    n_ft = length(totalcomorbid_ft)
+
+    println("""
+        total vaccinated: $(n_tv),
+
+        total g1/g2: $(n_g12), vaccinated: $(length(totalg1g2_v))
+        total g3: $(n_g3), vaccinated: $(length(totalcomorbid_g3_v))
+        total n_ft: $(n_ft), vaccinated: $(length(totalcomorbid_ft_v))
+    """)
+end

@@ -649,24 +649,30 @@ function lama_eligible(sc)
     nb_s3 = Set(findall(x -> x.newborn == true && x.monthborn in 7:12, humans)) # LAMA 3
     nb_s4 = Set(findall(x -> x.newborn == true, humans)) # LAMA 4
     nb = [nb_s1, nb_s2, nb_s3, nb_s4]
-
+    
     # take the set differences to get the incremental infants added after each step
     elig_s1 = setdiff(nb_s1, Set([])) # doesn't do anything
     elig_s2 = setdiff(nb_s2, nb_s1)
     elig_s3 = setdiff(nb_s3, nb_s2, nb_s1) # essentiall all infants in 7:12, but not preterms (since thats s2)
-    elig_s4 = setdiff(nb_s4, nb_s3, nb_s2, nb_s1) # essentiall all infants in 7:12, but not preterms (since thats s2)
+    elig_s4 = setdiff(nb_s4, nb_s3, nb_s2, nb_s1) # essentiall all infants but not those in previous categories
     
     # convert to vectors for sampling
     _vecs = collect.([elig_s1, elig_s2, elig_s3, elig_s4])
     @info ("length vecs: $(length.(_vecs))")
     
     if sc == "s5"
-        # this is a special combination of LAMA 1 and LAMA 2 
-        # its 80% of all gestation 1/2 and 5% of gestation 3 
+        # combination scenario 
+        # 80% of gestation 1/2 -- (80% of LAMA 1) 
+        # 80% of comorbid infants
+
+        # find all comorbid infants
+        nb_tmp = Set(findall(x -> x.newborn == true && x.comorbidity > 0, humans))
+        elig_tmp = collect(setdiff(nb_tmp, nb_s1)) # remove the ones already in LAMA 1
+
         _nl1 = Int(round(0.80 * length(_vecs[1])))
-        _nl2 = Int(round(0.05 * length(_vecs[2])))
+        _nl2 = Int(round(0.80 * length(elig_tmp)))
         eligible_l1 = sample(vax_rng, _vecs[1], _nl1, replace=false)
-        eligible_l2 = sample(vax_rng, _vecs[2], _nl2, replace=false)
+        eligible_l2 = sample(vax_rng, elig_tmp, _nl2, replace=false)
         total_eligible = [eligible_l1..., eligible_l2...]
     else 
         # calculate 90% coverage for each group, and then sample these counts 
