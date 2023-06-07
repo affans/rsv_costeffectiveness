@@ -44,6 +44,8 @@ Base.@kwdef mutable struct ModelParameters    ## use @with_kw from Parameters
     lhs_inpatient_preterm3::Matrix{Float64} = zeros(Float64, numofsims, 12) 
     lhs_inpatient_fullterm::Matrix{Float64} = zeros(Float64, numofsims, 12)
     lhs_mortality::Matrix{Float64} = zeros(Float64, numofsims, 6)
+    l1_l4_coverage::Float64 = 0.90 # coverage for L1 to L4 
+    l5_coverage::Float64 = 0.80 # coverage for L5
 end
 
 # constant variables
@@ -669,15 +671,16 @@ function lama_eligible(sc)
         nb_tmp = Set(findall(x -> x.newborn == true && x.comorbidity > 0, humans))
         elig_tmp = collect(setdiff(nb_tmp, nb_s1)) # remove the ones already in LAMA 1
 
-        _nl1 = Int(round(0.80 * length(_vecs[1])))
-        _nl2 = Int(round(0.80 * length(elig_tmp)))
+        coverage = p.l5_coverage
+        _nl1 = Int(round(coverage * length(_vecs[1])))
+        _nl2 = Int(round(coverage * length(elig_tmp)))
         eligible_l1 = sample(vax_rng, _vecs[1], _nl1, replace=false)
         eligible_l2 = sample(vax_rng, elig_tmp, _nl2, replace=false)
         total_eligible = [eligible_l1..., eligible_l2...]
     else 
         # calculate 90% coverage for each group, and then sample these counts 
         # make sure that you are passing in the vaccine specific RNG and `replace=false` to sample without replacement
-        coverage = 0.90
+        coverage = p.l1_l4_coverage
         covlengths = Int.(round.(coverage .* length.(_vecs))) # 90% of their total lengths... 
         eligible_per_strategy = sample.(vax_rng, _vecs, covlengths, replace=false)
         
