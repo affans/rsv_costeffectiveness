@@ -46,6 +46,7 @@ Base.@kwdef mutable struct ModelParameters    ## use @with_kw from Parameters
     lhs_mortality::Matrix{Float64} = zeros(Float64, numofsims, 6)
     l1_l4_coverage::Float64 = 0.90 # coverage for L1 to L4 
     l5_coverage::Float64 = 0.80 # coverage for L5
+    mat_coverage::Float64 = 0.60 # coverage for materal immunization 
 end
 
 # constant variables
@@ -614,9 +615,9 @@ function incidence()
     return totalsick
 end    
 
-function maternal_vaccine(coverage=0.60) 
+function maternal_vaccine() 
     # all newborns get maternal vaccine with some coverage
-    newborns = findall(x -> x.newborn == true && rand(vax_rng) < coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
+    newborns = findall(x -> x.newborn == true && rand(vax_rng) < p.mat_coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
     total_cost = length(newborns) * 100
     
     # define efficacy values over 12 months from time of administration
