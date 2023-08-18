@@ -24,3 +24,4 @@ docs/site/
 Manifest.toml
 output
 log.txt
+.DS_Store
