@@ -46,7 +46,7 @@ Base.@kwdef mutable struct ModelParameters    ## use @with_kw from Parameters
     lhs_inpatient_fullterm::Matrix{Float64} = zeros(Float64, numofsims, 12)
     lhs_mortality::Matrix{Float64} = zeros(Float64, numofsims, 6)
     l1_l4_coverage::Float64 = 0.90 # coverage for L1 to L4 
-    l5_coverage::Float64 = 0.80 # coverage for L5
+    #l5_coverage::Float64 = 0.80 # coverage for L5
     mat_coverage::Float64 = 0.60 # coverage for materal immunization 
     vaccine_eff_scenaro::String = "sigmoidal" # "sigmoidal" or "fixed" 
 end
@@ -76,7 +76,6 @@ function debug(sc="s0")
     p.vaccine_eff_scenaro = "fixed" 
     p.l1_l4_coverage = 0.80 # 1.0 # 0.90 # coverage for L1 to L4 
     p.mat_coverage = 0.60  # coverage for materal immunization 
-    p.l5_coverage = 0.80 # coverage for L5 (will also use p.mat_coverage)  -- this makes it difficult to run s5 and s6-s10 if different mat coverages are needed 
     
     Random.seed!(53) # start all simulations by setting a seed - ensures reproducibilty
     assign_inpatient_death_probs_to_modelparams() 
@@ -104,6 +103,12 @@ function simulate_scenario(sc)
     #println("running simulation $(sc) on core id: $(myid())")
     sc_data = zeros(Float64, p.numofsims, 11)
    
+    println("running scenario $sc typeof $(typeof(sc)) on core id: $(myid())")
+    # dont run unneccessary simulations
+    if sc ∉ [:s0, :s1, :s2, :s4, :s5, :s10]
+        return sc_data
+    end
+    
     for i = 1:p.numofsims
         # set relevant seeds for each simulation 
         Random.seed!(vax_rng, 5 * i) # set the seed for vaccine function
@@ -144,17 +149,18 @@ function simulations()
     @everywhere logger = NullLogger()
     @everywhere global_logger(logger)
 
-    @everywhere p.numofsims = 16
+    @everywhere p.numofsims = 5
     @everywhere p.vaccine_eff_scenaro = "fixed" 
 
     @everywhere p.l1_l4_coverage = 0.80 # 1.0 # 0.90 # coverage for L1 to L4 
     @everywhere p.mat_coverage = 0.60  # coverage for materal immunization 
-    @everywhere p.l5_coverage = 0.80 # coverage for L5 (will also use p.mat_coverage)  -- this makes it difficult to run s5 and s6-s10 if different mat coverages are needed 
+    
     
     fname = "test_sims_sig_basecase.csv"
 
-    scenarios = String.([:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9, :s10])
-    scenarios = String.([:s0, :s1])
+    # many of these scenarios are not used anymore in revisions, but we keep the file structure the same so Seyed doesn't have to adjust plotting scripts
+    scenarios = [:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9, :s10]
+    #scenarios = String.([:s0, :s1])
 
     all_data = [] # container to store the data
     
@@ -176,26 +182,21 @@ function simulations()
 end
 
 function vaccine_scenarios(scenario) 
-    # ignore the costs being returned from the function -- seyed will calculate in his script
     lama_cnt = 0 
     mat_cnt = 0 
-    if scenario in ("s1", "s2", "s3", "s4")
+
+    # adjusted scenarios for revisions... the s10 scenario is a combination of LAMA(s1) + MAT
+    if scenario in (:s1, :s2, :s4)
         _, cnt = lama_vaccine(scenario) 
         lama_cnt = cnt
         mat_cnt = 0 
-    elseif scenario == "s5"
+    elseif scenario == :s5
         _, cnt = maternal_vaccine()
         lama_cnt = 0 
         mat_cnt = cnt 
-    elseif scenario in ("s6", "s7", "s8", "s9")
-        scc = "s" * string(parse(Int, scenario[end]) - 5)
-        _, c1 = maternal_vaccine() 
-        _, c2 = lama_vaccine(scc)
-        lama_cnt = c2 
-        mat_cnt = c1 
-    elseif scenario == "s10" 
-        _, mat_cnt = maternal_vaccine()
-        _, lama_cnt = lama_vaccine("s5")
+    elseif scenario == :s10  # combination LAMA + MAT
+        _, mcnt = maternal_vaccine()
+        _, lcnt = lama_vaccine(:s1)
     end
     return lama_cnt, mat_cnt
 end
@@ -644,8 +645,9 @@ end
 function maternal_vaccine() 
     # all newborns get maternal vaccine with some coverage
     newborns = findall(x -> x.newborn == true && rand(vax_rng) < p.mat_coverage, humans) # for each newborn baby, determine their vaccine efficacy for each month of the simulation. 
-    total_cost = length(newborns) * 100
+    total_cost = 0 # we don't need to track the costs, Seyed is handling on his side.
     
+    # old efficacies
     # define efficacy values over 12 months from time of administration
     # eff_outp = [72, 63, 49, 34, 23, 16, 13, 11, 10, 0, 0, 0] ./ 100
     # eff_hosp = [93, 82, 69, 56, 43, 32, 24, 19, 15, 0, 0, 0] ./ 100
@@ -685,60 +687,43 @@ end
 
 function lama_eligible(sc) 
     # LAMA vaccine is incremental. 
-    # so LAMA 2 should include all the selected people from LAMA 1 
-    # and LAMA 3 should add on top of LAMA 2, and so on
+    # so L2 should include all the selected people from L1 
+    # and L3 should add on top of L2, and so on
 
-    nb_s1 = Set(findall(x -> x.newborn == true && x.gestation in (1, 2), humans)) # LAMA 1
-    nb_s2 = Set(findall(x -> x.newborn == true && x.preterm == true, humans)) # LAMA 2
-    nb_s3 = Set(findall(x -> x.newborn == true && x.monthborn in 7:12, humans)) # LAMA 3
-    nb_s4 = Set(findall(x -> x.newborn == true, humans)) # LAMA 4
-    nb = [nb_s1, nb_s2, nb_s3, nb_s4]
+    sc ∉ (:s1, :s2, :s4, :s10) && error("invalid LAMA strategy")
+
+    # find all comorbid infants
+    nb_co = findall(x -> x.newborn == true && x.comorbidity > 0, humans)
+        
+    # find infants based on gestation (# 1 = <29, 2 = 29-32 weeks, 3 = 33-36 weeks)
+    nb_s1 = findall(x -> x.newborn == true && x.gestation in (1, 2), humans)
+    nb_s2 = findall(x -> x.newborn == true && x.preterm == true, humans)
+    nb_s3 = findall(x -> x.newborn == true, humans)
     
-    # take the set differences to get the incremental infants added after each step
-    elig_s1 = setdiff(nb_s1, Set([])) # doesn't do anything
-    elig_s2 = setdiff(nb_s2, nb_s1)
-    elig_s3 = setdiff(nb_s3, nb_s2, nb_s1) # essentiall all infants in 7:12, but not preterms (since thats s2)
-    elig_s4 = setdiff(nb_s4, nb_s3, nb_s2, nb_s1) # essentiall all infants but not those in previous categories
+    elig_s1 = union(nb_s1, nb_co) 
+    elig_s2 = union(nb_s2, nb_co) # includes s1 
+    elig_s3 = union(nb_s3, nb_co) # includes s1 and s2
     
     # convert to vectors for sampling
-    _vecs = collect.([elig_s1, elig_s2, elig_s3, elig_s4])
-    @info ("length vecs: $(length.(_vecs))")
-    
-    if sc == "s5"
-        # combination scenario 
-        # 80% of gestation 1/2 -- (80% of LAMA 1) 
-        # 80% of comorbid infants
+    _vecs = (; s1 = elig_s1, s2 = elig_s2, s4 = elig_s3, s10 = elig_s1) # s10 is LMI (same as S1 + Maternal)
+    eligible = _vecs[sc]
+   
+    coverage = p.l1_l4_coverage
+    num_to_sample = round(Int, coverage * length(eligible)) # 90% of their total lengths... 
+    eligible_per_strategy = sample(vax_rng, eligible, num_to_sample, replace=false)
 
-        # find all comorbid infants
-        nb_tmp = Set(findall(x -> x.newborn == true && x.comorbidity > 0, humans))
-        elig_tmp = collect(setdiff(nb_tmp, nb_s1)) # remove the ones already in LAMA 1
-
-        coverage = p.l5_coverage
-        _nl1 = Int(round(coverage * length(_vecs[1])))
-        _nl2 = Int(round(coverage * length(elig_tmp)))
-        eligible_l1 = sample(vax_rng, _vecs[1], _nl1, replace=false)
-        eligible_l2 = sample(vax_rng, elig_tmp, _nl2, replace=false)
-        total_eligible = [eligible_l1..., eligible_l2...]
-    else 
-        # calculate 90% coverage for each group, and then sample these counts 
-        # make sure that you are passing in the vaccine specific RNG and `replace=false` to sample without replacement
-        coverage = p.l1_l4_coverage
-        covlengths = Int.(round.(coverage .* length.(_vecs))) # 90% of their total lengths... 
-        eligible_per_strategy = sample.(vax_rng, _vecs, covlengths, replace=false)
-        
-        total_eligible = @match sc begin 
-            "s1" => [eligible_per_strategy[1]...]
-            "s2" => [eligible_per_strategy[1]..., eligible_per_strategy[2]...]
-            "s3" => [eligible_per_strategy[1]..., eligible_per_strategy[2]..., eligible_per_strategy[3]...]
-            "s4" => [eligible_per_strategy[1]..., eligible_per_strategy[2]..., eligible_per_strategy[3]..., eligible_per_strategy[4]...]
-            _ =>  error("wrong strategy for lama vaccination")
-        end
-    end
-    
-    return total_eligible
+    return eligible_per_strategy
 end
 
 function lama_vaccine(strategy) 
+    # REVISION SCENARIOS: 
+    # L1 Infants ≤32 wGA, and infants with CLD or CHD 
+    # L2 Infants ≤36 wGA, and infants with CLD or CHD 
+    # L3 Entire birth cohort
+    # MI Pregnant women 
+    # LMI Infants ≤32 wGA, and infants with CLD or CHD  and pregnant women
+
+    # OLD SCENARIOS 
     # (i) vaccination of preterm infants under 32 wGA with 90% coverage (S1); 
     # (ii) vaccination of all preterm infants with 90% coverage  !!! in addition to (i); 
     # (iii) vaccination of infants born in month 7:12 with 90% coverage  !!! in addition to (ii); 
@@ -747,16 +732,9 @@ function lama_vaccine(strategy)
     # get the IDs of newborns based on strategy 
     # `lama_eligible` builds the list of newborns incrementally
     newborns = lama_eligible(strategy)
-    total_costs = @match strategy begin 
-        "s1" => length(newborns) * 1000
-        "s2" => length(newborns) * 1000
-        "s3" => length(newborns) * 1000
-        "s4" => 1088 * 550 # ALL 1088 BABIES ARE VACCINATED -- IF CHANGING THE NUMBER OF BABIES, UPDATE THIS VALUE
-        "s5" => length(newborns) * 1000
-        _ =>  error("wrong strategy for lama vaccination")
-    end
+    total_costs = 0 # we don't need to track the costs, Seyed is handling on his side.
 
-    # theoretical efficacies
+    # old efficacies
     # eff_outp = [100, 96, 87, 70, 50, 33, 23, 19, 17, 0, 0, 0] ./ 100
     # eff_hosp = [100, 95, 84, 67, 47, 31, 22, 18, 16, 0, 0, 0] ./ 100
     # eff_icu = [100, 97, 91, 80, 64, 47, 33, 24, 20, 0, 0, 0] ./ 100
@@ -775,8 +753,6 @@ function lama_vaccine(strategy)
     else 
         error("invalid vaccine efficacy setting")
     end
-
-
 
     # assign the efficacies to infants based on when they are born and when the vaccine is administered
     for (i, h) in enumerate(newborns)    
