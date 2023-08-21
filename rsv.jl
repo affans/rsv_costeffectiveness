@@ -105,7 +105,7 @@ function simulate_scenario(sc)
    
     println("running scenario $sc typeof $(typeof(sc)) on core id: $(myid())")
     # dont run unneccessary simulations
-    if sc ∉ [:s0, :s1, :s2, :s4, :s5, :s10]
+    if sc ∉ [:s0, :s1, :s2, :s3, :s4, :s5, :s10]
         return sc_data
     end
     
@@ -186,7 +186,7 @@ function vaccine_scenarios(scenario)
     mat_cnt = 0 
 
     # adjusted scenarios for revisions... the s10 scenario is a combination of LAMA(s1) + MAT
-    if scenario in (:s1, :s2, :s4)
+    if scenario in (:s1, :s2, :s3, :s4)
         _, cnt = lama_vaccine(scenario) 
         lama_cnt = cnt
         mat_cnt = 0 
@@ -195,8 +195,8 @@ function vaccine_scenarios(scenario)
         lama_cnt = 0 
         mat_cnt = cnt 
     elseif scenario == :s10  # combination LAMA + MAT
-        _, mcnt = maternal_vaccine()
-        _, lcnt = lama_vaccine(:s1)
+        _, mat_cnt = maternal_vaccine()
+        _, lama_cnt = lama_vaccine(:s1)
     end
     return lama_cnt, mat_cnt
 end
@@ -689,8 +689,7 @@ function lama_eligible(sc)
     # LAMA vaccine is incremental. 
     # so L2 should include all the selected people from L1 
     # and L3 should add on top of L2, and so on
-
-    sc ∉ (:s1, :s2, :s4, :s10) && error("invalid LAMA strategy")
+    sc ∉ (:s1, :s2, :s3, :s4, :s10) && error("invalid LAMA strategy")
 
     # find all comorbid infants
     nb_co = findall(x -> x.newborn == true && x.comorbidity > 0, humans)
@@ -698,14 +697,16 @@ function lama_eligible(sc)
     # find infants based on gestation (# 1 = <29, 2 = 29-32 weeks, 3 = 33-36 weeks)
     nb_s1 = findall(x -> x.newborn == true && x.gestation in (1, 2), humans)
     nb_s2 = findall(x -> x.newborn == true && x.preterm == true, humans)
-    nb_s3 = findall(x -> x.newborn == true, humans)
+    nb_s3 = findall(x -> x.newborn == true && (x.preterm == true || x.monthborn in 7:12), humans)
+    nb_s4 = findall(x -> x.newborn == true, humans)
     
     elig_s1 = union(nb_s1, nb_co) 
     elig_s2 = union(nb_s2, nb_co) # includes s1 
     elig_s3 = union(nb_s3, nb_co) # includes s1 and s2
+    elig_s4 = union(nb_s4, nb_co) # includes s1 and s2
     
     # convert to vectors for sampling
-    _vecs = (; s1 = elig_s1, s2 = elig_s2, s4 = elig_s3, s10 = elig_s1) # s10 is LMI (same as S1 + Maternal)
+    _vecs = (; s1 = elig_s1, s2 = elig_s2, s3 = elig_s3, s4 = elig_s4, s10 = elig_s1) # s10 is LMI (same as S1 + Maternal)
     eligible = _vecs[sc]
    
     coverage = p.l1_l4_coverage
