@@ -74,7 +74,7 @@ function debug(sc="s0")
     reset_params()  # reset the parameters for the simulation scenario    
    
     p.vaccine_eff_scenaro = "fixed" 
-    p.l1_l4_coverage = 0.80 # 1.0 # 0.90 # coverage for L1 to L4 
+    p.l1_l4_coverage = 0.35 # 1.0 # 0.90 # coverage for L1 to L4 
     p.mat_coverage = 0.60  # coverage for materal immunization 
     
     Random.seed!(53) # start all simulations by setting a seed - ensures reproducibilty
@@ -87,11 +87,11 @@ function debug(sc="s0")
     
     set_inpatient_and_death_probs(simulate_id)
     nb = demographics(); println("total newborns: $nb")
+    
     chd, cld = apply_comorbidities()
     apply_qalys();
     tf = incidence(); println("total episodes sampled: $tf")
     vc = vaccine_scenarios(sc); println("vaccine cnts: $vc")
-
     nbs, ql, qd, rc, dc, inpats, outpats, non_ma, hospdays = outcome_analysis()
     println("total deaths: $dc")
     println("total qalys: $ql")
@@ -690,30 +690,38 @@ function lama_eligible(sc)
     # so L2 should include all the selected people from L1 
     # and L3 should add on top of L2, and so on
     sc ∉ (:s1, :s2, :s3, :s4, :s10) && error("invalid LAMA strategy")
-
+   
     # find all comorbid infants
     nb_co = findall(x -> x.newborn == true && x.comorbidity > 0, humans)
+    
+    # find infants based on gestation/monthborn
+    nb_s1 = union(nb_co, findall(x -> x.newborn == true && x.gestation in (1, 2), humans))
+    nb_s2 = union(nb_co, findall(x -> x.newborn == true && x.preterm == true, humans))
+    nb_s3 = union(nb_co, findall(x -> x.newborn == true && (x.preterm == true || x.monthborn in 7:12), humans))
+    nb_s4 = union(nb_co, findall(x -> x.newborn == true, humans))
         
-    # find infants based on gestation (# 1 = <29, 2 = 29-32 weeks, 3 = 33-36 weeks)
-    nb_s1 = findall(x -> x.newborn == true && x.gestation in (1, 2), humans)
-    nb_s2 = findall(x -> x.newborn == true && x.preterm == true, humans)
-    nb_s3 = findall(x -> x.newborn == true && (x.preterm == true || x.monthborn in 7:12), humans)
-    nb_s4 = findall(x -> x.newborn == true, humans)
-    
-    elig_s1 = union(nb_s1, nb_co) 
-    elig_s2 = union(nb_s2, nb_co) # includes s1 
-    elig_s3 = union(nb_s3, nb_co) # includes s1 and s2
-    elig_s4 = union(nb_s4, nb_co) # includes s1 and s2
-    
-    # convert to vectors for sampling
-    _vecs = (; s1 = elig_s1, s2 = elig_s2, s3 = elig_s3, s4 = elig_s4, s10 = elig_s1) # s10 is LMI (same as S1 + Maternal)
-    eligible = _vecs[sc]
-   
-    coverage = p.l1_l4_coverage
-    num_to_sample = round(Int, coverage * length(eligible)) # 90% of their total lengths... 
-    eligible_per_strategy = sample(vax_rng, eligible, num_to_sample, replace=false)
+    # take the set differences to get the incremental infants added after each step
+    elig_s1 = nb_s1 #setdiff(nb_s1, Set([])) # doesn't do anything -- setdiff with empty set is not type safe 
+    elig_s2 = setdiff(nb_s2, nb_s1)
+    elig_s3 = setdiff(nb_s3, nb_s2, nb_s1) # essentiall all infants in 7:12, but not preterms (since thats s2)
+    elig_s4 = setdiff(nb_s4, nb_s3, nb_s2, nb_s1) # essentiall all infants but not those in previous categories
 
-    return eligible_per_strategy
+    # # convert to vectors for sampling
+    _vecs = collect.([elig_s1, elig_s2, elig_s3, elig_s4])
+    # @info ("length vecs: $(length.(_vecs))")
+    
+    coverage = p.l1_l4_coverage
+    covlengths = Int.(round.(coverage .* length.(_vecs))) 
+    eligible_per_strategy = sample.(vax_rng, _vecs, covlengths, replace=false)
+        
+    total_eligible = @match string(sc) begin 
+        "s1" => [eligible_per_strategy[1]...]
+        "s2" => [eligible_per_strategy[1]..., eligible_per_strategy[2]...]
+        "s3" => [eligible_per_strategy[1]..., eligible_per_strategy[2]..., eligible_per_strategy[3]...]
+        "s4" => [eligible_per_strategy[1]..., eligible_per_strategy[2]..., eligible_per_strategy[3]..., eligible_per_strategy[4]...]
+        _ =>  error("wrong strategy for lama vaccination")
+    end
+    return total_eligible
 end
 
 function lama_vaccine(strategy) 
