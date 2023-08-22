@@ -26,6 +26,7 @@ Base.@kwdef mutable struct Human
     rsvmonth::Vector{Int64} = Int64[]
     rsvage::Vector{Int64} = Int64[]
     rsvtype::Vector{Int64} = Int64[] # 1=MA, 2=NMA
+    rsvhospitalized::Bool = false # a flag to see if person is hospitalized
     vac_lama::Bool = false # flags for if a person gets LAMA or is maternally immunized 
     vac_mat::Bool = false 
     eff_outpatient::Vector{Float64} = zeros(Float64, 24)
@@ -67,6 +68,42 @@ const prob_inpatient_preterm_2 = zeros(Float64, 12)
 const prob_inpatient_preterm_3 = zeros(Float64, 12)
 const prob_inpatient_preterm = [prob_inpatient_preterm_1, prob_inpatient_preterm_2, prob_inpatient_preterm_3]
 const prob_death_rate = zeros(Float64, 6) #elements 1:3 are for preterm, element 4 is fullterm, element 5 and 6 are CHD/CLD#
+
+function plot_ma_incidence() 
+    #logger = NullLogger()
+    global_logger(ConsoleLogger())
+    reset_params()  # reset the parameters for the simulation scenario    
+
+    p.vaccine_eff_scenaro = "fixed" 
+    p.l1_l4_coverage = 0.35 # 1.0 # 0.90 # coverage for L1 to L4 
+    p.mat_coverage = 0.60  # coverage for materal immunization 
+
+    Random.seed!(53) # start all simulations by setting a seed - ensures reproducibilty
+    assign_inpatient_death_probs_to_modelparams() 
+
+    # should be less than the number of simulations
+    simulate_id = 100 ## THIS WILL SIMULATE WITH THIS SEED
+    Random.seed!(vax_rng, 5 * simulate_id)  # set the seed randomly for the vaccine functions
+    Random.seed!(53 * simulate_id) 
+    
+    set_inpatient_and_death_probs(simulate_id)
+    nb = demographics(); println("total newborns: $nb")
+    chd, cld = apply_comorbidities()
+    apply_qalys();
+    tf = incidence(); println("total episodes sampled: $tf")
+   # nbs, ql, qd, rc, dc, inpats, outpats, non_ma, hospdays = outcome_analysis()
+    
+    # now go through the human array and get the historgram 
+    sick_nb = findall(x -> x.newborn == true && x.rsvpositive > 0, humans) 
+    aa = [humans[x].rsvmonth for x in sick_nb]
+    bb =  vcat(aa...)
+
+    _newborns = findall(x -> x.newborn == true, humans)
+    xxnb = [humans[x].monthborn for x in _newborns]  # months of the babies born
+
+
+    bb
+end
 
 function debug(sc="s0")
     logger = NullLogger()
@@ -149,13 +186,10 @@ function simulations()
     @everywhere logger = NullLogger()
     @everywhere global_logger(logger)
 
-    @everywhere p.numofsims = 5
+    @everywhere p.numofsims = 1000
     @everywhere p.vaccine_eff_scenaro = "fixed" 
-
     @everywhere p.l1_l4_coverage = 0.80 # 1.0 # 0.90 # coverage for L1 to L4 
     @everywhere p.mat_coverage = 0.60  # coverage for materal immunization 
-    
-    
     fname = "test_sims_sig_basecase.csv"
 
     # many of these scenarios are not used anymore in revisions, but we keep the file structure the same so Seyed doesn't have to adjust plotting scripts
@@ -237,7 +271,8 @@ function demographics()
     @info "newborns distribution: $babies_per_month, sum: $(sum(babies_per_month)), times two: $(sum(babies_per_month) *2)"
 
 #    println("$babies_per_month")    
-    # from the first age group, remove n agents to be added in as newborns later
+    # from the first age group, remove n agents to be added in as newborns later (we want to maintain 100000)
+    # basically these are the agents we don't really care about -- have no affect in the model
     size_per_ag[1] = size_per_ag[1] - (sum(babies_per_month) * 2) # x2 because we are doing two years worth of babies 
     @info "adjusted pop sizes (removed newborns from first age group: $size_per_ag, sum: $(sum(size_per_ag))"
     
@@ -587,16 +622,19 @@ function incidence()
     yr2_monthly_agegroup_incidence, yr2_monthly_agegroup_non_ma = get_monthly_agegroup_infcnt()    
     monthly_agegroup_incidence = hcat(yr1_monthly_agegroup_incidence, yr2_monthly_agegroup_incidence)
     monthly_agegroup_non_ma = hcat(yr1_monthly_agegroup_non_ma, yr2_monthly_agegroup_non_ma)
-    
+    @info "size of monthly_ag_incidence:" monthly_agegroup_incidence
     @info "total infections to distribute" sum(monthly_agegroup_incidence)+sum(monthly_agegroup_non_ma) 
  
 
-    # loop through months: Order is April => 1, May => 2, etc (verify that the vectors used to inject babies and sample monthly counts are in the right order!) 
+    # loop through months: Order is April => 1, May => 2, etc 
+    # MUST VERIFY that the vectors used to inject babies and sample monthly newborns are in the right order!
     for mth in 1:24
         _acnb = activate_newborns(mth) 
         @info "simulating month: $mth, activating: $_acnb newborns"
 
         # eligble children (0 - 730 days of age) split into 5 age groups (because the counts are sampled over these five age groups)
+        # ag1_idx includes all the newborns since their ageindays = 1, but need to make sure not to get babies that are not born yet
+        # ag1_idx should not include 'non-newborns' -- everyone should be >30 ageindays
         ag1_idx = findall(x -> x.ageindays > 0  && x.ageindays <= 30 && within_3_month(x, mth) && x.monthborn == mth, humans) 
         ag2_idx = findall(x -> x.ageindays > 30  && x.ageindays <= 90 && within_3_month(x, mth), humans)
         ag3_idx = findall(x -> x.ageindays > 90  && x.ageindays <= 180 && within_3_month(x, mth), humans)
@@ -639,6 +677,7 @@ function incidence()
     end
     # error check, all newborns should be activated
     @info "newborns not activated (should be zero): $(length(findall(x -> x.newborn == true && x.activeaging == false, humans)))"
+    @info "actual total sick inserted into the system: $(totalsick)"
     return totalsick
 end    
 
@@ -769,7 +808,7 @@ function lama_vaccine(strategy)
         mb = x.monthborn
         # a quick error check
         mb > 12 && error("error in newborns/vaccine, someone is being tracked over 12 months of age") 
-        fm = max(7, mb)
+        fm = mb #max(7, mb)
         em = fm + 11
         x.eff_outpatient[fm:em] .= eff_outp
         x.eff_hosp[fm:em] .= eff_hosp
@@ -950,14 +989,11 @@ function outcome_flow(x)
         distr = x.preterm ? prob_inpatient_preterm[x.gestation] : prob_inpatient_fullterm
         diff = (rm - x.monthborn) + 1 
         _pb = distr[diff] # get the month specific probability of inpatient
-      
         # adjust inpatient probability by comorbidity
         if x.comorbidity > 0  
             OR = x.comorbidity == 1 ? 1.9 : 2.2 # Odds Ratio
             _pb = (OR * _pb) / (1 + (OR*_pb) - _pb) # https://stats.stackexchange.com/questions/324410/converting-odds-ratio-to-percentage-increase-reduction
         end
-        
-    
         _pb = _pb * (1 - x.eff_hosp[rm])    
         prob_inpatient = _pb
   
@@ -1003,9 +1039,8 @@ function outcome_flow(x)
         
         # at this point the infant is MA and will either be an outpatient or inpatient 
         # outcome flows for inpatient/outpatient, icu/ward, wheezing, and recovery/death
-      
-
-        if rn_inpatient < prob_inpatient  
+        if rn_inpatient < prob_inpatient 
+            x.rsvhospitalized = true
             push!(flow, "inpatient")
             if rn_icu < prob_icu 
                 push!(flow, "icu")
