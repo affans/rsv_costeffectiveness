@@ -98,60 +98,25 @@ function debug()
     return ql
 end
 
-function seed_finder() 
-    println("starting simulations on core id: $(myid())")
-    #return 
-    @everywhere reset_params()  # reset the model parameters 
 
-    # get a log file for simulations only -- save all the @info statement to files
-    # io = open("log.txt", "w")
-    # logger = SimpleLogger(io)
-    # global_logger(logger)
-    @everywhere logger = NullLogger()
-    @everywhere global_logger(logger)
-
-    @everywhere p.numofsims = 1000
-    Random.seed!(53) # start simulations by setting a seed - ensures reproducibilty
-    assign_inpatient_death_probs_to_modelparams() # for inpatient/death, generate samples of probabilities using LHS
-    potentialseeds = [500, 317, 476, 221, 516, 960, 191, 891, 202, 848, 204, 919, 610, 230, 625, 651, 12, 813, 396, 933, 730, 346, 776, 546, 732, 700, 145, 554, 206, 439, 736, 569, 277, 739, 664, 627, 850, 305, 936, 0, 751, 957, 28, 732, 984, 274, 247, 475, 418, 464, 512, 482, 21, 743, 51, 543, 742, 767, 847, 974, 288, 750, 282, 527, 272, 634, 315, 487, 170, 284, 367, 485, 953, 819, 400, 378, 89, 997, 756, 366, 790, 201, 583, 279, 687, 145, 335, 370, 546, 863, 158, 979, 432, 416, 455, 352, 135, 843, 640, 952]
-
-    p = Progress(length(potentialseeds), barglyphs=BarGlyphs("[=> ]"))
-    all_data = progress_pmap(1:length(potentialseeds), progress=p) do x
-        simulate_scenario(:s1, x)
-    end
-    display(all_data)
-    
-    sc_data = zeros(Int64, length(potentialseeds), 2000+1)
-    sc_data[:, 1] .= potentialseeds
-    for (r, c) in enumerate(all_data)
-        println("length of c: $(length(c))")
-        sc_data[r, 2:(length(c)+1)] .= c
-    end
-    return sc_data
-end 
-
-simulate_scenario(sc) = simulate_scenario(sc, 53)
-
-# function to simulate a specific scenario
+# function to simulate a specific vaccine scenario
+simulate_scenario(sc) = simulate_scenario(sc, 158)
 function simulate_scenario(sc, _seed)
     #println("running simulation $(sc) on core id: $(myid())")
     sc_data = zeros(Float64, p.numofsims, 11)
-   
-    println("running scenario $sc typeof $(typeof(sc)) on core id: $(myid())")
+
     # dont run unneccessary simulations
     if sc ∉ [:s0, :s1, :s2, :s3, :s4, :s5, :s10]
         return sc_data
     end
     
-    rsmdata = Vector{Vector{Int64}}(undef, p.numofsims) 
-
     for i = 1:p.numofsims
         # set relevant seeds for each simulation 
         Random.seed!(vax_rng, 5 * i) # set the seed for vaccine function
         Random.seed!(_seed * i) # Set GLOBAL RNG SEED for each simulation so that the same number of newborns/preterms/incidence are sampled! 
         
         # set the inpatient/death probabilities (which are sampled through LHS)
-        set_inpatient_and_death_probs(i)
+        # set_inpatient_and_death_probs(i)
 
         # run model functions
         nb = demographics() # initialize the human population 
@@ -160,19 +125,11 @@ function simulate_scenario(sc, _seed)
         tf = incidence() # sample the total number of infected individuals
         lc, mc = vaccine_scenarios(sc) # apply vaccine dynamics
         nbs, ql, qd, rc, dc, inpats, outpats, non_ma, hospdays = outcome_analysis() # perform outcome analysis 
-        
-        # seed finding data
-        _nbsick = findall(x -> x.rsvhospitalized == true, humans) 
-        _rsm = [humans[x].rsvmonth for x in _nbsick]
-        #println("i $i $_rsm typeof $(typeof(_rsm)), vcat: $(vcat(_rsm...))")
-        rsmdata[i] = vcat(_rsm...) 
-        
 
         # store simulation data
         sc_data[i,  :] .= [nbs, lc, mc, rc, dc, ql, qd, inpats, outpats, non_ma, hospdays]
     end
-    return vcat(rsmdata...)
-    #return sc_data 
+    return sc_data 
 end
 
 # main run function -- if distributed procs are added, the scenarios are split over the cores
@@ -181,6 +138,13 @@ end
 # The @everywhere does nothing if no procs are added so we don't need to separate code for the distributed version
 # setup to use distributed 
 # using Distributed; addprocs(N); @everywhere include("rsv.jl")
+
+function get_file_name() 
+    ef = p.vaccine_eff_scenaro 
+    co = p.l1_l4_coverage == 0.80 ? "basecase" : "100"
+    return "sims_$ef_$co.csv"
+end
+
 function simulations() 
     println("starting simulations on core id: $(myid())")
     #return 
@@ -193,24 +157,20 @@ function simulations()
     @everywhere logger = NullLogger()
     @everywhere global_logger(logger)
 
-    @everywhere p.numofsims = 10
+    @everywhere p.numofsims = 1000
     @everywhere p.vaccine_eff_scenaro = "fixed" 
     @everywhere p.l1_l4_coverage = 0.80 # 1.0 # 0.90 # coverage for L1 to L4 
     @everywhere p.mat_coverage = 0.60  # coverage for materal immunization 
-    fname = "test_sims_sig_basecase.csv"
+    fname = get_file_name()
 
     # many of these scenarios are not used anymore in revisions, but we keep the file structure the same so Seyed doesn't have to adjust plotting scripts
     scenarios = [:s0, :s1, :s2, :s3, :s4, :s5, :s6, :s7, :s8, :s9, :s10]
-    scenarios = [:s0]
-    #scenarios = String.([:s0, :s1])
-
-    all_data = [] # container to store the data
     
-    Random.seed!(53) # start simulations by setting a seed - ensures reproducibilty
+    Random.seed!(158) # start simulations by setting a seed - ensures reproducibilty
     assign_inpatient_death_probs_to_modelparams() # for inpatient/death, generate samples of probabilities using LHS
 
     all_data = pmap(scenarios) do x 
-        simulate_scenario(x)
+        simulate_scenario(x, 158)
     end 
     
     # generate colnames for Seyed's preferred format
@@ -219,7 +179,12 @@ function simulations()
     dfnames = vcat([sc .* colnames for sc in scnames]...)
     
     df = DataFrame(hcat(all_data...), dfnames)
-    CSV.write("output/$(fname)", df)
+
+    if gethostname() == "hpc"
+        CSV.write("/data/$(fname)", df)
+    else
+        CSV.write("$(fname)", df)
+    end 
     return df
 end
 
@@ -273,8 +238,8 @@ function demographics()
     @info "pop size per capita (from census data):" size_per_ag, sum(size_per_ag)
 
     # data on babies/newborn, order is June to May multiplied twice since we are doing two years
-    babies_per_month = pc.(@SVector [11864, 11095, 11830, 13331, 13149, 13051, 13117, 13618, 11376, 11191, 11141, 11614])  
-    preterms_per_month = pc.(@SVector [949, 910, 899, 888, 1016, 983, 1044, 1050, 1089, 1067, 1060, 1010 ])
+    babies_per_month = pc.(@SVector [12291, 13052, 13127, 13618, 13331, 13249, 12624, 11864, 11376, 11242, 11095, 12830])
+    preterms_per_month = pc.(@SVector [983, 1044, 1050, 1089, 1067, 1060, 1010, 949, 910, 899, 888, 1026])
     prop_pre_terms = preterms_per_month ./ babies_per_month # we do it this way to generate some stochasticity instead of fixing the number of preterms per month
     @info "newborns distribution: $babies_per_month, sum: $(sum(babies_per_month)), times two: $(sum(babies_per_month) *2)"
 
@@ -599,8 +564,8 @@ function get_monthly_agegroup_infcnt()
     # this works for both MA and N-MA cases
     # this is split between the age groups:  #<19 d, 19–89 d, 90d to <6mo, 6mo to <1yr, 
     # order APRIL TO MARCH
-    month_distr_ag1 = @SVector [0.0845, 0.0563, 0.0141, 0.0141, 0.0181, 0.0563, 0.0845, 0.1117, 0.1409, 0.1549, 0.1408, 0.1117]
-    month_distr_ag2 = @SVector [0.0845, 0.0563, 0.0141, 0.0141, 0.0181, 0.0563, 0.0845, 0.1117, 0.1409, 0.1549, 0.1408, 0.1117]
+    month_distr_ag1 = @SVector [0.0845, 0.0563, 0.0141, 0.0141, 0.0181, 0.0563, 0.0845, 0.1127, 0.1409, 0.1549, 0.1408, 0.1127]
+    month_distr_ag2 = @SVector [0.0845, 0.0563, 0.0141, 0.0141, 0.0181, 0.0563, 0.0845, 0.1127, 0.1409, 0.1549, 0.1408, 0.1127]
     month_distr_ag3 = @SVector [0.0615, 0.0417, 0.0108, 0.0108, 0.0417, 0.0615, 0.0833, 0.1150, 0.1667, 0.1667, 0.115, 0.0833]
     month_distr_ag4 = @SVector [0.0714, 0.0357, 0.0357, 0.0357, 0.0357, 0.0714, 0.1071, 0.1419, 0.1430, 0.1419, 0.1071, 0.0714]
     month_distr_ag5 = @SVector [0.0556, 0.0556, 0.0556, 0.0556, 0.0556, 0.0556, 0.0556, 0.1111, 0.1663, 0.1667, 0.1111, 0.0556]
@@ -1056,7 +1021,6 @@ function outcome_flow(x)
         # for non-ma episodes (either by sampled or by vaccine), ignore the remaining code
         if rt == 2 || outpatient_ct
             push!(flow, "nonma")
-            sampled_days["symptomatic"] = days_symptomatic * (1 - 0.60) # if NMA, replace symptomatic dates with 60% of them
             continue
         end
         
@@ -1079,7 +1043,6 @@ function outcome_flow(x)
                     sampled_days["wheezing"] +=  rand(Uniform(5.2, 9.8))
                 end
             else 
-                x.rsvhospitalized = true
                 push!(flow, "death")
                 sampled_days["death"] += ic # by assigning death as ic (1 or 2) it gives us an indication of when death happened
             end
