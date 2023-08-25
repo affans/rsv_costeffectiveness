@@ -69,29 +69,29 @@ const prob_inpatient_preterm_3 = zeros(Float64, 12)
 const prob_inpatient_preterm = [prob_inpatient_preterm_1, prob_inpatient_preterm_2, prob_inpatient_preterm_3]
 const prob_death_rate = zeros(Float64, 6) #elements 1:3 are for preterm, element 4 is fullterm, element 5 and 6 are CHD/CLD#
 
-function debug()
+function debug(sc, simulate_id)
     logger = NullLogger()
     global_logger(logger)
     reset_params()  # reset the parameters for the simulation scenario    
    
     p.vaccine_eff_scenaro = "fixed" 
-    p.l1_l4_coverage = 0.35 # 1.0 # 0.90 # coverage for L1 to L4 
+    p.l1_l4_coverage = 1.0# 0.35 # 1.0 # 0.90 # coverage for L1 to L4 
     p.mat_coverage = 0.60  # coverage for materal immunization 
     
-    Random.seed!(53) # start all simulations by setting a seed - ensures reproducibilty
+    Random.seed!(158) # start all simulations by setting a seed - ensures reproducibilty
     assign_inpatient_death_probs_to_modelparams() 
 
     # should be less than the number of simulations
-    simulate_id = 15 ## THIS WILL SIMULATE WITH THIS SEED
+    #simulate_id = 460 ## THIS WILL SIMULATE WITH THIS SEED
     Random.seed!(vax_rng, 5 * simulate_id)  # set the seed randomly for the vaccine functions
-    Random.seed!(53 * simulate_id) 
+    Random.seed!(158 * simulate_id) 
     
     set_inpatient_and_death_probs(simulate_id)
     nb = demographics(); println("total newborns: $nb")
     chd, cld = apply_comorbidities()
     apply_qalys();
     tf = incidence(); println("total episodes sampled: $tf")
-    vc = vaccine_scenarios(:s1); println("vaccine cnts: $vc")
+    vc = vaccine_scenarios(sc); println("vaccine cnts: $vc")
     nbs, ql, qd, rc, dc, inpats, outpats, non_ma, hospdays = outcome_analysis()
     println("total deaths: $dc")
     println("total qalys: $ql")
@@ -611,11 +611,11 @@ function incidence()
         # eligble children (0 - 730 days of age) split into 5 age groups (because the counts are sampled over these five age groups)
         # ag1_idx includes all the newborns since their ageindays = 1, but need to make sure not to get babies that are not born yet
         # ag1_idx should not include 'non-newborns' -- everyone should be >30 ageindays
-        ag1_idx = findall(x -> x.ageindays > 0  && x.ageindays <= 30 && within_3_month(x, mth) && x.monthborn == mth, humans) 
-        ag2_idx = findall(x -> x.ageindays > 30  && x.ageindays <= 90 && within_3_month(x, mth), humans)
-        ag3_idx = findall(x -> x.ageindays > 90  && x.ageindays <= 180 && within_3_month(x, mth), humans)
-        ag4_idx = findall(x -> x.ageindays > 180 && x.ageindays <= 365 && within_3_month(x, mth), humans)
-        ag5_idx = findall(x -> x.ageindays > 365 && x.ageindays <= 730 && within_3_month(x, mth), humans)
+        ag1_idx = shuffle!(findall(x -> x.ageindays > 0  && x.ageindays <= 30 && within_3_month(x, mth) && x.monthborn == mth, humans))
+        ag2_idx = shuffle!(findall(x -> x.ageindays > 30  && x.ageindays <= 90 && within_3_month(x, mth), humans))
+        ag3_idx = shuffle!(findall(x -> x.ageindays > 90  && x.ageindays <= 180 && within_3_month(x, mth), humans))
+        ag4_idx = shuffle!(findall(x -> x.ageindays > 180 && x.ageindays <= 365 && within_3_month(x, mth), humans))
+        ag5_idx = shuffle!(findall(x -> x.ageindays > 365 && x.ageindays <= 730 && within_3_month(x, mth), humans))
         ag_idx = [ag1_idx, ag2_idx, ag3_idx, ag4_idx, ag5_idx]
 
         # get the month specific infection counts for all age groups
@@ -702,17 +702,18 @@ function lama_eligible(sc)
     # LAMA vaccine is incremental. 
     # so L2 should include all the selected people from L1 
     # and L3 should add on top of L2, and so on
-    sc ∉ (:s1, :s2, :s3, :s4, :s10) && error("invalid LAMA strategy")
+    sc ∉ (:s1, :s2, :s3, :s4) && error("invalid LAMA strategy")
    
     # find all comorbid infants
     nb_co = findall(x -> x.newborn == true && x.comorbidity > 0, humans)
-    
+    #nb_co = []
     # find infants based on gestation/monthborn
     nb_s1 = union(nb_co, findall(x -> x.newborn == true && x.gestation in (1, 2), humans))
     nb_s2 = union(nb_co, findall(x -> x.newborn == true && x.preterm == true, humans))
     nb_s3 = union(nb_co, findall(x -> x.newborn == true && (x.preterm == true || x.monthborn in 7:12), humans))
     nb_s4 = union(nb_co, findall(x -> x.newborn == true, humans))
-        
+    
+
     # take the set differences to get the incremental infants added after each step
     elig_s1 = nb_s1 #setdiff(nb_s1, Set([])) # doesn't do anything -- setdiff with empty set is not type safe 
     elig_s2 = setdiff(nb_s2, nb_s1)
@@ -726,6 +727,11 @@ function lama_eligible(sc)
     coverage = p.l1_l4_coverage
     covlengths = Int.(round.(coverage .* length.(_vecs))) 
     eligible_per_strategy = sample.(vax_rng, _vecs, covlengths, replace=false)
+
+    ##idxs = [humans[x].idx for x in eligible_per_strategy]
+    ##isitin = 98108 ∈ idxs 
+    #println("is it in: $isitin")
+    println(elig_s2)
         
     total_eligible = @match string(sc) begin 
         "s1" => [eligible_per_strategy[1]...]
@@ -755,7 +761,6 @@ function lama_vaccine(strategy)
     # `lama_eligible` builds the list of newborns incrementally
     newborns = lama_eligible(strategy)
     total_costs = 0 # we don't need to track the costs, Seyed is handling on his side.
-
     # old efficacies
     # eff_outp = [100, 96, 87, 70, 50, 33, 23, 19, 17, 0, 0, 0] ./ 100
     # eff_hosp = [100, 95, 84, 67, 47, 31, 22, 18, 16, 0, 0, 0] ./ 100
@@ -779,11 +784,13 @@ function lama_vaccine(strategy)
     # assign the efficacies to infants based on when they are born and when the vaccine is administered
     for (i, h) in enumerate(newborns)    
         x = humans[h]
+        
         mb = x.monthborn
         # a quick error check
         mb > 12 && error("error in newborns/vaccine, someone is being tracked over 12 months of age") 
         fm = max(7, mb)
         em = fm + 11
+        
         x.eff_outpatient[fm:em] .= eff_outp
         x.eff_hosp[fm:em] .= eff_hosp
         x.eff_icu[fm:em] .= eff_icu
@@ -970,6 +977,7 @@ function outcome_flow(x)
         end
         _pb = _pb * (1 - x.eff_hosp[rm])    
         prob_inpatient = _pb
+        
   
         # probability of ICU is sampled from Uniform distributions depending on the gestation period 
         if x.gestation in (1, 2) 
@@ -995,12 +1003,13 @@ function outcome_flow(x)
         ft = rand(outcomes_RNG, Uniform(0.0002, 0.01))
         hd = rand(outcomes_RNG, Uniform(0.034, 0.053)) # heart disease
         ld = rand(outcomes_RNG, Uniform(0.035, 0.051)) # lung disease
-        # p1 = rand(outcomes_RNG, Uniform(0.01, 0.02))
-        # p2 = rand(outcomes_RNG, Uniform(0.01, 0.02))
-        # p3 = rand(outcomes_RNG, Uniform(0.01, 0.02))
-        # ft = rand(outcomes_RNG, Uniform(0.01, 0.02))
-        # hd = rand(outcomes_RNG, Uniform(0.01, 0.02)) # heart disease
-        # ld = rand(outcomes_RNG, Uniform(0.01, 0.02)) # lung disease
+        # p1 = rand(outcomes_RNG, Uniform(0.99, 1.0))
+        # p2 = rand(outcomes_RNG, Uniform(0.99, 1.0))
+        # p3 = rand(outcomes_RNG, Uniform(0.99, 1.0))
+        # ft = rand(outcomes_RNG, Uniform(0.99, 1.0))
+        # hd = rand(outcomes_RNG, Uniform(0.99, 1.0))
+        # ld = rand(outcomes_RNG, Uniform(0.99, 1.0))
+        
         _prob_death_rate = [p1, p2, p3, ft, hd, ld]
         prob_recovery = x.preterm ? _prob_death_rate[x.gestation] : _prob_death_rate[4] # the 4th element of `prob_death_rate` corresponds to full term mortality rate
         if x.comorbidity > 0
@@ -1018,6 +1027,17 @@ function outcome_flow(x)
         # i.e., essentially turns a MA infant to a N-MA infant (the loop will not run) 
         outpatient_ct = rn_outpatient < x.eff_outpatient[rm] 
         
+        # # 97792, 97847, 97859, 97860, 97906, 97910, 97919, 97931, 97947, 97948, 97953, 97989, 97992, 98017, 98063, 98109, 98111, 98115, 98143, 98151, 98169, 98175, 98206, 98219, 98235, 98246, 98264, 98313, 98316, 98321, 98340, 98351, 98361, 98362, 98394, 98396, 98405, 98410, 98433, 98434, 98442, 98447, 98448, 98456, 98467, 98470, 98486, 98507, 98513, 98533, 98571, 98579, 98586, 98626, 98656, 98672, 98677, 98699, 98721, 98733, 98746, 98751, 98765, 98790, 98802, 98812, 98824, 98836, 98844, 98848, 98876, 98879]
+        # testsubject = 97947
+        # if x.idx == testsubject
+
+        #     println("monthborn $(x.monthborn) rsvmonth: $rm type: $(rt), vax? $(x.vac_lama)")
+        #     println("will turn non-ma: $outpatient_ct, eff: $(x.eff_outpatient[rm])")
+        #     println("prob of inpatient before vaccine: $_tmp, after vaccine: $(prob_inpatient)")
+        #     println("will inpatient: $(rn_inpatient < prob_inpatient) coin flip: $rn_inpatient, prob_inpatient: $prob_inpatient, eff: $(x.eff_icu[rm]) ")
+        #     #println("will die: $(rn_recovery < prob_recovery)")
+        # end
+
         # for non-ma episodes (either by sampled or by vaccine), ignore the remaining code
         if rt == 2 || outpatient_ct
             push!(flow, "nonma")
@@ -1146,7 +1166,7 @@ function outcome_analysis()
     # this function performs outcome analysis on all infants with RSV episodes 
    
     # find all newborns that had atleast one symptomatic episode in their first year of life
-    newborns = findall(x -> x.newborn == true && x.rsvpositive > 0 && (x.rsvmonth[1] - x.monthborn) <= 11, humans)
+    newborns = shuffle!(findall(x -> x.newborn == true && x.rsvpositive > 0 && (x.rsvmonth[1] - x.monthborn) <= 11, humans))
 
     # sanity check: there are some infants that will have an infection outside their first year of life... lets print out the difference
     _nbpos = findall(x -> x.newborn == true && x.rsvpositive > 0, humans) 
