@@ -116,7 +116,7 @@ function simulate_scenario(sc, _seed)
         Random.seed!(_seed * i) # Set GLOBAL RNG SEED for each simulation so that the same number of newborns/preterms/incidence are sampled! 
         
         # set the inpatient/death probabilities (which are sampled through LHS)
-        # set_inpatient_and_death_probs(i)
+        set_inpatient_and_death_probs(i)
 
         # run model functions
         nb = demographics() # initialize the human population 
@@ -142,7 +142,7 @@ end
 function get_file_name() 
     ef = p.vaccine_eff_scenaro 
     co = p.l1_l4_coverage == 0.80 ? "basecase" : "100"
-    return "sims_$ef_$co.csv"
+    return "sims_$(ef)_$(co).csv"
 end
 
 function simulations() 
