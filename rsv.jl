@@ -731,7 +731,6 @@ function lama_eligible(sc)
     ##idxs = [humans[x].idx for x in eligible_per_strategy]
     ##isitin = 98108 ∈ idxs 
     #println("is it in: $isitin")
-    println(elig_s2)
         
     total_eligible = @match string(sc) begin 
         "s1" => [eligible_per_strategy[1]...]
@@ -997,12 +996,12 @@ function outcome_flow(x)
         # the 4th element of `prob_death_rate` corresponds to full term mortality rate
         # elements 5 and 6 correspond to CHD/CLD (and overwrites the probability of non-cld/chd probs)
 
-        p1 = rand(outcomes_RNG, Uniform(0.0036, 0.033))
-        p2 = rand(outcomes_RNG, Uniform(0.0036, 0.033))
-        p3 = rand(outcomes_RNG, Uniform(0.0002, 0.0182))
-        ft = rand(outcomes_RNG, Uniform(0.0002, 0.01))
-        hd = rand(outcomes_RNG, Uniform(0.034, 0.053)) # heart disease
-        ld = rand(outcomes_RNG, Uniform(0.035, 0.051)) # lung disease
+        # p1 = rand(outcomes_RNG, Uniform(0.0036, 0.033))
+        # p2 = rand(outcomes_RNG, Uniform(0.0036, 0.033))
+        # p3 = rand(outcomes_RNG, Uniform(0.0002, 0.0182))
+        # ft = rand(outcomes_RNG, Uniform(0.0002, 0.01))
+        # hd = rand(outcomes_RNG, Uniform(0.034, 0.053)) # heart disease
+        # ld = rand(outcomes_RNG, Uniform(0.035, 0.051)) # lung disease
         # p1 = rand(outcomes_RNG, Uniform(0.99, 1.0))
         # p2 = rand(outcomes_RNG, Uniform(0.99, 1.0))
         # p3 = rand(outcomes_RNG, Uniform(0.99, 1.0))
@@ -1010,11 +1009,11 @@ function outcome_flow(x)
         # hd = rand(outcomes_RNG, Uniform(0.99, 1.0))
         # ld = rand(outcomes_RNG, Uniform(0.99, 1.0))
         
-        _prob_death_rate = [p1, p2, p3, ft, hd, ld]
-        prob_recovery = x.preterm ? _prob_death_rate[x.gestation] : _prob_death_rate[4] # the 4th element of `prob_death_rate` corresponds to full term mortality rate
+        #_prob_death_rate = [p1, p2, p3, ft, hd, ld]
+        prob_recovery = x.preterm ? prob_death_rate[x.gestation] : prob_death_rate[4] # the 4th element of `prob_death_rate` corresponds to full term mortality rate
         if x.comorbidity > 0
             _aidx = x.comorbidity + 4 # comorbidity is either 1 or 2 (chd or cld) which corresponds to elements 5 and 6 of prob_death_rate
-            prob_recovery = _prob_death_rate[_aidx] 
+            prob_recovery = prob_death_rate[_aidx] 
         end    
 
         # for every single rsv episode, sample the number of symptomatic days 
