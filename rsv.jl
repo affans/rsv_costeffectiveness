@@ -782,7 +782,7 @@ function lama_vaccine(strategy)
         mb = x.monthborn
         # a quick error check
         mb > 12 && error("error in newborns/vaccine, someone is being tracked over 12 months of age") 
-        fm = mb #max(7, mb)
+        fm = max(7, mb)
         em = fm + 11
         x.eff_outpatient[fm:em] .= eff_outp
         x.eff_hosp[fm:em] .= eff_hosp
