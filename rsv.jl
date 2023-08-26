@@ -132,19 +132,18 @@ function simulate_scenario(sc, _seed)
     return sc_data 
 end
 
+function get_file_name() 
+    ef = p.vaccine_eff_scenaro 
+    co = p.l1_l4_coverage == 1.0 ? "100" : "80"
+    return "sims_$(ef)_$(co).csv"
+end
+
 # main run function -- if distributed procs are added, the scenarios are split over the cores
 # each scenario resets the population on its core 
 # I don't know if its possible to run simulations in parallel, but I don't think so
 # The @everywhere does nothing if no procs are added so we don't need to separate code for the distributed version
 # setup to use distributed 
 # using Distributed; addprocs(N); @everywhere include("rsv.jl")
-
-function get_file_name() 
-    ef = p.vaccine_eff_scenaro 
-    co = p.l1_l4_coverage == 0.80 ? "basecase" : "100"
-    return "sims_$(ef)_$(co).csv"
-end
-
 function simulations() 
     println("starting simulations on core id: $(myid())")
     #return 
@@ -705,10 +704,10 @@ function lama_eligible(sc)
     sc ∉ (:s1, :s2, :s3, :s4) && error("invalid LAMA strategy")
    
     # find all comorbid infants
-    nb_co = findall(x -> x.newborn == true && x.comorbidity > 0 && x.vac_mat == false , humans)
+    nb_co = findall(x -> x.newborn == true && x.comorbidity > 0 , humans)
     #nb_co = []
     # find infants based on gestation/monthborn
-    nb_s1 = union(nb_co, findall(x -> x.newborn == true && x.gestation in (1, 2) && x.vac_mat == false, humans))
+    nb_s1 = union(nb_co, findall(x -> x.newborn == true && x.gestation in (1, 2), humans))
     nb_s2 = union(nb_co, findall(x -> x.newborn == true && x.preterm == true, humans))
     nb_s3 = union(nb_co, findall(x -> x.newborn == true && (x.preterm == true || x.monthborn in 7:12), humans))
     nb_s4 = union(nb_co, findall(x -> x.newborn == true, humans))
