@@ -705,10 +705,10 @@ function lama_eligible(sc)
     sc ∉ (:s1, :s2, :s3, :s4) && error("invalid LAMA strategy")
    
     # find all comorbid infants
-    nb_co = findall(x -> x.newborn == true && x.comorbidity > 0, humans)
+    nb_co = findall(x -> x.newborn == true && x.comorbidity > 0 && x.vac_mat == false , humans)
     #nb_co = []
     # find infants based on gestation/monthborn
-    nb_s1 = union(nb_co, findall(x -> x.newborn == true && x.gestation in (1, 2), humans))
+    nb_s1 = union(nb_co, findall(x -> x.newborn == true && x.gestation in (1, 2) && x.vac_mat == false, humans))
     nb_s2 = union(nb_co, findall(x -> x.newborn == true && x.preterm == true, humans))
     nb_s3 = union(nb_co, findall(x -> x.newborn == true && (x.preterm == true || x.monthborn in 7:12), humans))
     nb_s4 = union(nb_co, findall(x -> x.newborn == true, humans))
