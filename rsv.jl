@@ -976,7 +976,7 @@ function outcome_flow(x, sim_id)
         _prob_inpatient_fullterm = ft
         distr = x.preterm ? _prob_inpatient_preterm[x.gestation] : _prob_inpatient_fullterm
         diff = (rm - x.monthborn) + 1 
-        _pb = rand(outcomes_RNG, distr[diff]) / 100 # get the month specific probability of inpatient
+        _pb = rand(outcomes_RNG, Uniform(distr[diff]...)) / 100 # get the month specific probability of inpatient
         # adjust inpatient probability by comorbidity
         if x.comorbidity > 0  
             OR = x.comorbidity == 1 ? 1.9 : 2.2 # Odds Ratio
