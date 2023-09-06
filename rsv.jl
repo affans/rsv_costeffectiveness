@@ -103,7 +103,7 @@ end
 simulate_scenario(sc) = simulate_scenario(sc, 158)
 function simulate_scenario(sc, _seed)
     #println("running simulation $(sc) on core id: $(myid())")
-    sc_data = zeros(Float64, p.numofsims, 11)
+    sc_data = zeros(Float64, p.numofsims, 13)
 
     # dont run unneccessary simulations
     if sc ∉ [:s0, :s1, :s2, :s3, :s4, :s5, :s10]
@@ -124,10 +124,10 @@ function simulate_scenario(sc, _seed)
         apply_qalys()
         tf = incidence() # sample the total number of infected individuals
         lc, mc = vaccine_scenarios(sc) # apply vaccine dynamics
-        nbs, ql, qd, rc, dc, inpats, outpats, non_ma, hospdays = outcome_analysis(i) # perform outcome analysis, pass in simulation number to set internal seed
+        nbs, ql, qd, rc, dc, inpats, outpats, non_ma, hospdays, opc, ipc = outcome_analysis(i) # perform outcome analysis, pass in simulation number to set internal seed
 
         # store simulation data
-        sc_data[i,  :] .= [nbs, lc, mc, rc, dc, ql, qd, inpats, outpats, non_ma, hospdays]
+        sc_data[i,  :] .= [nbs, lc, mc, rc, dc, ql, qd, inpats, outpats, non_ma, hospdays, opc, ipc]
     end
     return sc_data 
 end
@@ -135,7 +135,11 @@ end
 function get_file_name() 
     ef = p.vaccine_eff_scenaro 
     co = p.l1_l4_coverage == 1.0 ? "100" : "80"
-    return "sims_$(ef)_$(co).csv"
+    if gethostname() == "hpc"
+        return "/data/sims_$(ef)_$(co).csv"
+    else
+        return "./sims_$(ef)_$(co).csv"
+    end 
 end
 
 # main run function -- if distributed procs are added, the scenarios are split over the cores
@@ -173,17 +177,20 @@ function simulations()
     end 
     
     # generate colnames for Seyed's preferred format
-    colnames = ["_newborns", "_lama_cnt", "_mat_cnt", "_rsvcost", "_deathcost", "_totalqalys", "qalylost_death", "_inpatients", "_outpatients", "_non_ma", "_hospdays"]
+    colnames = ["_newborns", "_lama_cnt", "_mat_cnt", "_rsvcost", "_deathcost", "_totalqalys", "qalylost_death", "_inpatients", "_outpatients", "_non_ma", "_hospdays", "_outpatientcost", "_inpatientcost"]
     scnames = string.(scenarios)
     dfnames = vcat([sc .* colnames for sc in scnames]...)
-    
     df = DataFrame(hcat(all_data...), dfnames)
 
-    if gethostname() == "hpc"
-        CSV.write("/data/$(fname)", df)
-    else
-        CSV.write("$(fname)", df)
-    end 
+    # for the revisions, we had to include outpatient/inpatient costs (see relevant commit)
+    # but in order to prevent Seyed's code from completely breaking (since he relies on indicies of columns) 
+    # we split the new columns into its own dataframe
+    _cnames_to_remove = vcat([sc .* ["_outpatientcost", "_inpatientcost"] for sc in scnames]...)
+    orig_df = select(df, Not(_cnames_to_remove...))
+    costs_df = select(df, _cnames_to_remove...)
+    
+    CSV.write("$(fname)", orig_df)
+    CSV.write("$(fname)_costs", costs_df)
     return df
 end
 
@@ -1153,7 +1160,12 @@ function calculate_costs(x, sampled_days)
     end
     costs["cost_outpatient"] = (sampled_days["emergencydept"] * 342) + (sampled_days["office_consultation"] * 229) 
     cost_due_to_death = sampled_days["death"] > 0 ? 2292572 : 0
-    return sum(values(costs)), cost_due_to_death
+
+    # for the revisions, we split the cost between outpatient and inpatient
+    op_costs = costs["cost_outpatient"] + costs["cost_wheezing"] + costs["cost_hosp_followup"]
+    ip_costs = costs["cost_in_icu"] + costs["cost_in_ward"] 
+
+    return sum(values(costs)), cost_due_to_death, op_costs, ip_costs
 end
 
 function outcome_analysis(sim_id)
@@ -1171,6 +1183,8 @@ function outcome_analysis(sim_id)
     totalqalys = 0
     qalyslost_death = 0 
     totalcosts = 0
+    totalcosts_inpatient = 0 
+    totalcosts_outpatient = 0
     totalcosts_death = 0
     total_inpatients = 0 
     total_outpatients = 0
@@ -1187,9 +1201,11 @@ function outcome_analysis(sim_id)
 
         # calculate qalys and costs
         tq, ql = calculate_qaly(x, sampled_days) 
-        tc, cl = calculate_costs(x, sampled_days)
+        tc, cl, opc, ipc = calculate_costs(x, sampled_days)
         totalqalys += tq
         totalcosts += tc
+        totalcosts_outpatient += opc
+        totalcosts_inpatient += ipc
         qalyslost_death += ql 
         totalcosts_death += cl
 
@@ -1207,7 +1223,7 @@ function outcome_analysis(sim_id)
     # CSV.write("./output/sim_$(randstring(5)).csv", df)
     #return qalyslost
 
-    return length(newborns), totalqalys, qalyslost_death, totalcosts, totalcosts_death, total_inpatients, total_outpatients, total_non_ma, total_hosp_days
+    return length(newborns), totalqalys, qalyslost_death, totalcosts, totalcosts_death, total_inpatients, total_outpatients, total_non_ma, total_hosp_days, totalcosts_outpatient, totalcosts_inpatient
 end
 
 function infection_tup(x) 
